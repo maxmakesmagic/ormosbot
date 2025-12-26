@@ -233,16 +233,20 @@ def main() -> None:
                     register_page_queries(page_title, cached_queries, queries)
                     continue
 
-            page_queries = process_page(site, page)
-            register_page_queries(page_title, page_queries, queries)
-            revision_cache[page_title] = current_revision_record(
-                page, latest_rev_id, page_queries
-            )
-            if (idx + 1) % 100 == 0:
-                pywikibot.info(f"Processed {idx + 1} pages...")
-                pywikibot.info(f"  Current queries: {len(queries)}")
-                dump_queries_to_file(queries, output_file)
-                dump_revision_cache(revision_cache, revision_cache_path)
+            try:
+                page_queries = process_page(site, page)
+                register_page_queries(page_title, page_queries, queries)
+                revision_cache[page_title] = current_revision_record(
+                    page, latest_rev_id, page_queries
+                )
+                if (idx + 1) % 100 == 0:
+                    pywikibot.info(f"Processed {idx + 1} pages...")
+                    pywikibot.info(f"  Current queries: {len(queries)}")
+                    dump_queries_to_file(queries, output_file)
+                    dump_revision_cache(revision_cache, revision_cache_path)
+            except pywikibot.exceptions.TimeoutError as exc:
+                pywikibot.error(f"  TimeoutError processing {page_title}: {exc}")
+                continue
 
     dump_queries_to_file(queries, output_file)
     dump_revision_cache(revision_cache, revision_cache_path)
