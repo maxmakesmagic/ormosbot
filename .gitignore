@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Login credentials
+*.lwp
+config.json
+user-password.cfg
+
+# Caches
+apicache/
+cache.db
+scryfall_revision_cache.json
+
+# Generated files
+scryfall_queries.json
+scryfall_queries.map
+ScryfallStats_data.lua
+giantswitch.txt
+throttle.ctrl
+
+# Logs
+logs/
+*.log

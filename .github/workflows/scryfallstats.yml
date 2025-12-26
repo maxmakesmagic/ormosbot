@@ -1,0 +1,71 @@
+name: Update Scryfall Stats
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update-scryfall-stats:
+    runs-on: ubuntu-latest
+    environment: OrmosBot
+    timeout-minutes: 600
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore cached Scryfall data
+        uses: actions/cache@v4
+        with:
+          path: |
+            cache.db
+            scryfall_revision_cache.json
+          key: scryfall-cache-${{ github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Write config.json from secret
+        run: |
+          python - <<'EOF'
+          import json, os, pathlib
+          config = os.environ["CONFIG_JSON"]
+          path = pathlib.Path("config.json")
+          path.write_text(config, encoding="utf-8")
+          EOF
+        env:
+          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
+
+      - name: Write user-password.cfg from secret
+        run: |
+          python - <<'EOF'
+          import os, pathlib
+          config = os.environ["USER_PASSWORD_CFG"]
+          path = pathlib.Path("user-password.cfg")
+          path.write_text(config, encoding="utf-8")
+          EOF
+        env:
+          USER_PASSWORD_CFG: ${{ secrets.USER_PASSWORD_CFG }}
+
+      - name: Run pwb login
+        run: uv run pwb login
+
+      - name: Install
+        run: uv pip install -e .
+
+      - name: Run setstatsrendered
+        run: uv run setstatsrendered
+
+      - name: Run update-module-data
+        run: uv run update-module-data
+
+      - name: Archive log files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-logs
+          path: "**/*.log"
+          if-no-files-found: warn

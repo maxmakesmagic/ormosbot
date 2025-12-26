@@ -1,0 +1,40 @@
+[project]
+name = "ormosbot"
+version = "0.1.0"
+description = "A bot for managing functionality on mtg.wiki"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "mwparserfromhell>=0.7.2",
+    "mypy>=1.19.1",
+    "packaging>=25.0",
+    "pywikibot>=10.7.4",
+    "requests>=2.32.5",
+    "requests-cache>=1.2.1",
+    "requests-ratelimiter>=0.7.0",
+    "ruff>=0.14.10",
+    "tenacity>=9.1.2",
+    "tqdm>=4.67.1",
+    "types-requests>=2.32.4.20250913",
+    "types-tqdm>=4.67.0.20250809",
+    "wikitextparser>=0.56.4",
+]
+
+[project.scripts]
+setstatsrendered = "ormosbot.setstatsrendered:main"
+update-module-data = "ormosbot.update_module_data:main"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+mypy_path = "src"
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = "pywikibot.*"
+ignore_missing_imports = true
+
+
