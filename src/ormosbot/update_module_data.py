@@ -119,6 +119,8 @@ def switch_from_mapping(data: dict[str, dict[str, str]]) -> str:
             value = stats.get(color, "0")
             lines.append(f"   | {color} = {value}")
         total = sum(int(stats.get(color, "0")) for color in COLOR_ORDER)
+        csv_values = ",".join(stats.get(color, "0") for color in COLOR_ORDER)
+        lines.append(f"   | csv = {csv_values}")
         lines.append(f"   | total = {total}")
         lines.append("   | default = 0")
         lines.append("  }}")
