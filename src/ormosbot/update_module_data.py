@@ -109,7 +109,7 @@ def lua_from_mapping(data: dict[str, dict[str, str]]) -> str:
 def switch_from_mapping(data: dict[str, dict[str, str]]) -> str:
     """Render the stats mapping into a wikitext #switch helper template."""
     lines = [
-        "<noinclude>Auto-generated data. Edit carefully.</noinclude>",
+        "<noinclude>{{Documentation}}</noinclude>",
         "{{#switch:{{lc:{{{query|}}}}}",
     ]
     for query, stats in data.items():
