@@ -115,12 +115,18 @@ def switch_from_mapping(data: dict[str, dict[str, str]]) -> str:
     for query, stats in data.items():
         normalized = query.casefold()
         lines.append(" | " + normalized + " = {{#switch:{{lc:{{{field|total}}}}}")
+
+        values: list[int] = []
         for color in COLOR_ORDER:
-            value = stats.get(color, "0")
+            value = int(stats.get(color, "0"))
             lines.append(f"   | {color} = {value}")
-        total = sum(int(stats.get(color, "0")) for color in COLOR_ORDER)
-        csv_values = ",".join(stats.get(color, "0") for color in COLOR_ORDER)
-        lines.append(f"   | csv = {csv_values}")
+            values.append(int(value))
+
+        total = sum(values)
+        csv_values = [str(v) for v in values]
+        csv_values.append(str(total))
+        csv_value_str = ",".join(csv_values)
+        lines.append(f"   | csv = {csv_value_str}")
         lines.append(f"   | total = {total}")
         lines.append("   | default = 0")
         lines.append("  }}")
