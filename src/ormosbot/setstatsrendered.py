@@ -201,6 +201,15 @@ def write_github_output(key: str, value: str) -> None:
         handle.write("\nEOF\n")
 
 
+def write_github_output_value(key: str, value: str) -> None:
+    """Append a single-line value to the GitHub Actions output file."""
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        raise RuntimeError("GITHUB_OUTPUT environment variable is not set")
+    with Path(output_path).open("a", encoding="utf-8") as handle:
+        handle.write(f"{key}={value}\n")
+
+
 def current_revision_record(
     page: pywikibot.Page,
     rev_id: int | None = None,
@@ -254,6 +263,10 @@ def main() -> None:
     parser.add_argument(
         "--matrix-output-file",
         help="Optional path to write the JSON matrix payload for inspection",
+    )
+    parser.add_argument(
+        "--total-output-key",
+        help="Emit the total number of queries to $GITHUB_OUTPUT using this key",
     )
 
     # handle_args strips global Pywikibot flags before argparse sees them
@@ -313,6 +326,15 @@ def main() -> None:
 
     sorted_queries = dump_queries_to_file(queries, output_file)
     dump_revision_cache(revision_cache, revision_cache_path)
+
+    if args.total_output_key:
+        total_queries = len(sorted_queries)
+        write_github_output_value(args.total_output_key, str(total_queries))
+        pywikibot.info(
+            "Appended total query count (%d) to $GITHUB_OUTPUT with key %s",
+            total_queries,
+            args.total_output_key,
+        )
 
     if args.matrix_output_key or args.matrix_output_file:
         matrix_entries = build_strategy_matrix_entries(

@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 600
     outputs:
       query-matrix: ${{ steps.generate_matrix.outputs.query-matrix }}
+      query-total: ${{ steps.generate_matrix.outputs.query-total }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -63,7 +64,7 @@ jobs:
 
       - name: Run setstatsrendered
         id: generate_matrix
-        run: uv run setstatsrendered --matrix-output-key query-matrix
+        run: uv run setstatsrendered --matrix-output-key query-matrix --total-output-key query-total
 
       - name: Upload Scryfall query data
         uses: actions/upload-artifact@v4
@@ -202,6 +203,7 @@ jobs:
       - name: Update wiki with merged stats
         run: uv run update-module-data --stats-dir shard-stats
         env:
+          EXPECTED_QUERY_TOTAL: ${{ needs.prepare_scryfall_data.outputs.query-total }}
           UPDATE_WIKI: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
 
       - name: Archive log files

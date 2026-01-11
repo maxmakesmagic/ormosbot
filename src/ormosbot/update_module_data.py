@@ -124,6 +124,19 @@ def should_update_wiki(env_var: str = "UPDATE_WIKI") -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def parse_expected_total(env_var: str = "EXPECTED_QUERY_TOTAL") -> int | None:
+    """Parse the expected total query count from the environment, if provided."""
+    raw_value = os.environ.get(env_var)
+    if raw_value is None or not raw_value.strip():
+        return None
+    try:
+        return int(raw_value.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable {env_var} must be an integer, got {raw_value!r}"
+        ) from exc
+
+
 def main() -> None:
     """Main entry point for update-module-data."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -154,6 +167,17 @@ def main() -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     stats_mapping = merge_stats_from_dir(stats_dir)
+    expected_total = parse_expected_total()
+    actual_total = len(stats_mapping)
+    if expected_total is not None:
+        if actual_total != expected_total:
+            raise RuntimeError(
+                f"Expected {expected_total} queries but merged {actual_total}"
+            )
+        pywikibot.info(
+            "Verified merged stats contain the expected %d queries",
+            expected_total,
+        )
     lua_code = lua_from_mapping(stats_mapping)
 
     # Write the lua code to file
