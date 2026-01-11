@@ -6,21 +6,23 @@ on:
     - cron: "0 0 * * *"
 
 jobs:
-  update-scryfall-stats:
+  prepare_scryfall_data:
     runs-on: ubuntu-latest
     environment: OrmosBot
     timeout-minutes: 600
+    outputs:
+      query-matrix: ${{ steps.generate_matrix.outputs.query-matrix }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Cache Scryfall data between runs to speed up processing
       - name: Restore cached Scryfall data
         id: cache-data-restore
         uses: actions/cache/restore@v4
         with:
-          key: scryfall-cache-${{ github.ref_name }}
+          key: scryfall-revisioncache-${{ github.ref_name }}
           path: |
-            cache.db
             scryfall_revision_cache.json
 
       - name: Set up Python
@@ -60,25 +62,152 @@ jobs:
         run: uv pip install -e .
 
       - name: Run setstatsrendered
-        run: uv run setstatsrendered
+        id: generate_matrix
+        run: uv run setstatsrendered --matrix-output-key query-matrix
 
-      - name: Run update-module-data
-        run: uv run update-module-data
+      - name: Upload Scryfall query data
+        uses: actions/upload-artifact@v4
+        with:
+          name: scryfall-query-data
+          path: |
+            scryfall_queries.json
+            scryfall_queries.map
+          if-no-files-found: error
+
+      - name: Always cache cache data
+        id: cache-save
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.cache-data-restore.outputs.cache-primary-key }}
+          path: |
+            scryfall_revision_cache.json
+
+  fetch-scryfall-stats:
+    needs: prepare_scryfall_data
+    runs-on: ubuntu-latest
+    environment: OrmosBot
+    timeout-minutes: 600
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_scryfall_data.outputs.query-matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore cached Scryfall data
+        id: cache-data-restore
+        uses: actions/cache/restore@v4
+        with:
+          key: scryfall-cache-${{ github.ref_name }}-shard-${{ matrix.chunk_index }}
+          path: |
+            cache.db
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install
+        run: uv pip install -e .
+
+      - name: Fetch Scryfall stats for shard
+        env:
+          MATRIX_CHUNK_INDEX: ${{ matrix.chunk_index }}
+          MATRIX_CHUNK_TOTAL: ${{ matrix.chunk_total }}
+          MATRIX_QUERY_COUNT: ${{ matrix.query_count }}
+          MATRIX_QUERIES_JSON: ${{ toJson(matrix.queries) }}
+        run: uv run fetch-module-stats --output-file chunk_stats.json
+
+      - name: Upload chunk stats
+        uses: actions/upload-artifact@v4
+        with:
+          name: scryfall-stats-chunk-${{ matrix.chunk_index }}
+          path: chunk_stats.json
+          if-no-files-found: error
 
       - name: Archive log files
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: workflow-logs
+          name: workflow-logs-chunk-${{ matrix.chunk_index }}
           path: "**/*.log"
           if-no-files-found: warn
 
       - name: Always cache cache data
         id: cache-save
-        if: always() && steps.cache-data-restore.outputs.cache-hit != 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           key: ${{ steps.cache-data-restore.outputs.cache-primary-key }}
           path: |
             cache.db
-            scryfall_revision_cache.json
+
+  update-scryfall-stats:
+    needs:
+      - prepare_scryfall_data
+      - fetch-scryfall-stats
+    runs-on: ubuntu-latest
+    environment: OrmosBot
+    timeout-minutes: 600
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download chunk stats
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scryfall-stats-chunk-*
+          path: shard-stats
+          merge-multiple: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Write config.json from secret
+        run: |
+          python - <<'EOF'
+          import json, os, pathlib
+          config = os.environ["CONFIG_JSON"]
+          path = pathlib.Path("config.json")
+          path.write_text(config, encoding="utf-8")
+          EOF
+        env:
+          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
+
+      - name: Write user-password.cfg from secret
+        run: |
+          python - <<'EOF'
+          import os, pathlib
+          config = os.environ["USER_PASSWORD_CFG"]
+          path = pathlib.Path("user-password.cfg")
+          path.write_text(config, encoding="utf-8")
+          EOF
+        env:
+          USER_PASSWORD_CFG: ${{ secrets.USER_PASSWORD_CFG }}
+
+      - name: Run pwb login
+        run: uv run pwb login
+
+      - name: Install
+        run: uv pip install -e .
+
+      - name: Update wiki with merged stats
+        run: uv run update-module-data --stats-dir shard-stats
+        env:
+          UPDATE_WIKI: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+
+      - name: Archive log files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-logs-final
+          path: "**/*.log"
+          if-no-files-found: warn
