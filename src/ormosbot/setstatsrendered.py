@@ -187,18 +187,7 @@ def build_strategy_matrix_entries(
 def render_matrix_json(entries: Sequence[dict[str, Any]]) -> str:
     """Render the matrix entries into a JSON string."""
     payload = {"include": list(entries)}
-    return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
-def write_github_output(key: str, value: str) -> None:
-    """Append a multi-line value to the GitHub Actions output file."""
-    output_path = os.environ.get("GITHUB_OUTPUT")
-    if not output_path:
-        raise RuntimeError("GITHUB_OUTPUT environment variable is not set")
-    with Path(output_path).open("a", encoding="utf-8") as handle:
-        handle.write(f"{key}<<'EOF'\n")
-        handle.write(value)
-        handle.write("\nEOF\n")
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def write_github_output_value(key: str, value: str) -> None:
@@ -351,7 +340,7 @@ def main() -> None:
             )
 
         if args.matrix_output_key:
-            write_github_output(args.matrix_output_key, matrix_json)
+            write_github_output_value(args.matrix_output_key, matrix_json)
             pywikibot.info(
                 f"Appended strategy matrix JSON to $GITHUB_OUTPUT with key {args.matrix_output_key}"
             )

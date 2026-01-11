@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: OrmosBot
     timeout-minutes: 600
+    env:
+      REVISION_CACHE_KEY_PREFIX: scryfall-revisioncache-${{ github.ref_name }}
+      REVISION_CACHE_KEY_MAIN: scryfall-revisioncache-main
     outputs:
       query-matrix: ${{ steps.generate_matrix.outputs.query-matrix }}
       query-total: ${{ steps.generate_matrix.outputs.query-total }}
@@ -22,7 +25,10 @@ jobs:
         id: cache-data-restore
         uses: actions/cache/restore@v4
         with:
-          key: scryfall-revisioncache-${{ github.ref_name }}
+          key: ${{ env.REVISION_CACHE_KEY_PREFIX }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ env.REVISION_CACHE_KEY_PREFIX }}-
+            ${{ env.REVISION_CACHE_KEY_MAIN }}-
           path: |
             scryfall_revision_cache.json
 
@@ -80,7 +86,7 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          key: ${{ steps.cache-data-restore.outputs.cache-primary-key }}
+          key: ${{ env.REVISION_CACHE_KEY_PREFIX }}-${{ github.run_id }}
           path: |
             scryfall_revision_cache.json
 
@@ -89,6 +95,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: OrmosBot
     timeout-minutes: 600
+    env:
+      SCRYFALL_CACHE_KEY_PREFIX: scryfall-cache-${{ github.ref_name }}
+      SCRYFALL_CACHE_KEY_MAIN: scryfall-cache-main
     strategy:
       matrix: ${{ fromJson(needs.prepare_scryfall_data.outputs.query-matrix) }}
     steps:
@@ -99,7 +108,10 @@ jobs:
         id: cache-data-restore
         uses: actions/cache/restore@v4
         with:
-          key: scryfall-cache-${{ github.ref_name }}-shard-${{ matrix.chunk_index }}
+          key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-
+            ${{ env.SCRYFALL_CACHE_KEY_MAIN }}-
           path: |
             cache.db
 
@@ -139,10 +151,10 @@ jobs:
 
       - name: Always cache cache data
         id: cache-save
-        if: always()
+        if: always() && matrix.chunk_index == 0
         uses: actions/cache/save@v4
         with:
-          key: ${{ steps.cache-data-restore.outputs.cache-primary-key }}
+          key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ github.run_id }}
           path: |
             cache.db
 
