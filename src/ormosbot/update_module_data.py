@@ -87,6 +87,13 @@ def merge_stats_from_dir(stats_dir: Path) -> dict[str, dict[str, str]]:
         raise RuntimeError(f"Stats directory {stats_dir} does not exist")
 
     json_files = sorted(p for p in stats_dir.rglob("*.json") if p.is_file())
+    pywikibot.info(
+        "Found %d stats JSON files under %s",
+        len(json_files),
+        stats_dir,
+    )
+    for shard_path in json_files:
+        pywikibot.info(" - %s", shard_path)
     if not json_files:
         raise RuntimeError(f"No stats JSON files found under {stats_dir}")
 
@@ -161,8 +168,9 @@ def main() -> None:
     config_path = Path(args.config)
     stats_dir = Path(args.stats_dir)
 
+    Path("logs").mkdir(exist_ok=True)
     logging.basicConfig(
-        level=logging.DEBUG, filename="update_module_data.log", filemode="w"
+        level=logging.DEBUG, filename="logs/update_module_data.log", filemode="w"
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 

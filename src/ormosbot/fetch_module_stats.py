@@ -143,6 +143,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    Path("logs").mkdir(exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="logs/fetch_module_stats.log")
+
     chunk_index = require_env_int("MATRIX_CHUNK_INDEX")
     queries_file = os.environ.get("MATRIX_QUERIES_FILE")
     if not queries_file:

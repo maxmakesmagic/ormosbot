@@ -146,13 +146,14 @@ jobs:
         env:
           MATRIX_CHUNK_INDEX: ${{ matrix.chunk_index }}
           MATRIX_QUERIES_FILE: query-chunks/chunk-${{ matrix.chunk_index }}.json
-        run: uv run fetch-module-stats --output-file chunk_stats.json
+        run: |
+          uv run fetch-module-stats --output-file chunk-${MATRIX_CHUNK_INDEX}.json
 
       - name: Upload chunk stats
         uses: actions/upload-artifact@v4
         with:
           name: scryfall-stats-chunk-${{ matrix.chunk_index }}
-          path: chunk_stats.json
+          path: chunk-${{ matrix.chunk_index }}.json
           if-no-files-found: error
 
       - name: Archive log files

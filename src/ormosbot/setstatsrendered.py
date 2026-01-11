@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 from collections.abc import Iterable, Iterator, Sequence
@@ -251,6 +252,9 @@ def main() -> None:
         "--total-output-key",
         help="Emit the total number of queries to $GITHUB_OUTPUT using this key",
     )
+
+    Path("logs").mkdir(exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="logs/setstatsrendered.log")
 
     # handle_args strips global Pywikibot flags before argparse sees them
     cli_args = _handle_args()
