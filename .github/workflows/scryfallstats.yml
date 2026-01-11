@@ -11,6 +11,7 @@ jobs:
     environment: OrmosBot
     timeout-minutes: 600
     env:
+      MATRIX_SPLITS: 10
       REVISION_CACHE_KEY_PREFIX: scryfall-revisioncache-${{ github.ref_name }}
       REVISION_CACHE_KEY_MAIN: scryfall-revisioncache-main
     outputs:
@@ -66,11 +67,18 @@ jobs:
         run: uv run pwb login
 
       - name: Install
-        run: uv pip install -e .
+        run: uv pip install --system -e .
 
       - name: Run setstatsrendered
         id: generate_matrix
-        run: uv run setstatsrendered --matrix-output-key query-matrix --total-output-key query-total
+        run: uv run setstatsrendered --total-output-key query-total --chunk-dir query-chunks --matrix-splits $MATRIX_SPLITS
+
+      - name: Upload query chunk files
+        uses: actions/upload-artifact@v4
+        with:
+          name: scryfall-query-chunks
+          path: query-chunks
+          if-no-files-found: error
 
       - name: Upload Scryfall query data
         uses: actions/upload-artifact@v4
@@ -99,19 +107,27 @@ jobs:
       SCRYFALL_CACHE_KEY_PREFIX: scryfall-cache-${{ github.ref_name }}
       SCRYFALL_CACHE_KEY_MAIN: scryfall-cache-main
     strategy:
-      matrix: ${{ fromJson(needs.prepare_scryfall_data.outputs.query-matrix) }}
+      matrix:
+        # One job per chunk index
+        chunk_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Download query chunk files
+        uses: actions/download-artifact@v4
+        with:
+          name: scryfall-query-chunks
+          path: query-chunks
 
       - name: Restore cached Scryfall data
         id: cache-data-restore
         uses: actions/cache/restore@v4
         with:
-          key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ github.run_id }}
+          key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-${{ github.run_id }}
           restore-keys: |
-            ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-
-            ${{ env.SCRYFALL_CACHE_KEY_MAIN }}-
+            ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-
+            ${{ env.SCRYFALL_CACHE_KEY_MAIN }}-${{ matrix.chunk_index }}-
           path: |
             cache.db
 
@@ -124,14 +140,12 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Install
-        run: uv pip install -e .
+        run: uv pip install --system -e .
 
       - name: Fetch Scryfall stats for shard
         env:
           MATRIX_CHUNK_INDEX: ${{ matrix.chunk_index }}
-          MATRIX_CHUNK_TOTAL: ${{ matrix.chunk_total }}
-          MATRIX_QUERY_COUNT: ${{ matrix.query_count }}
-          MATRIX_QUERIES_JSON: ${{ toJson(matrix.queries) }}
+          MATRIX_QUERIES_FILE: query-chunks/chunk-${{ matrix.chunk_index }}.json
         run: uv run fetch-module-stats --output-file chunk_stats.json
 
       - name: Upload chunk stats
@@ -151,10 +165,10 @@ jobs:
 
       - name: Always cache cache data
         id: cache-save
-        if: always() && matrix.chunk_index == 0
+        if: always()
         uses: actions/cache/save@v4
         with:
-          key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ github.run_id }}
+          key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-${{ github.run_id }}
           path: |
             cache.db
 
@@ -210,7 +224,7 @@ jobs:
         run: uv run pwb login
 
       - name: Install
-        run: uv pip install -e .
+        run: uv pip install --system -e .
 
       - name: Update wiki with merged stats
         run: uv run update-module-data --stats-dir shard-stats

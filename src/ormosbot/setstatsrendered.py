@@ -156,15 +156,17 @@ def dump_revision_cache(cache: dict[str, dict[str, Any]], path: Path) -> None:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
 
-def build_strategy_matrix_entries(
+def build_chunk_files(
     sorted_queries: Sequence[str],
     chunk_count: int,
-) -> list[dict[str, Any]]:
-    """Split the sorted queries into evenly sized chunks for a build matrix."""
+    *,
+    chunk_dir: Path,
+) -> None:
+    """Split the queries into evenly sized chunks and write them to disk."""
     chunk_count = max(1, chunk_count)
     query_total = len(sorted_queries)
     chunk_size = math.ceil(query_total / chunk_count) if query_total else 0
-    entries: list[dict[str, Any]] = []
+    chunk_dir.mkdir(parents=True, exist_ok=True)
     for chunk_index in range(chunk_count):
         if chunk_size:
             start = chunk_index * chunk_size
@@ -173,20 +175,15 @@ def build_strategy_matrix_entries(
             start = 0
             end = 0
         chunk_queries = list(sorted_queries[start:end])
-        entries.append(
-            {
-                "chunk_index": chunk_index,
-                "chunk_total": chunk_count,
-                "query_count": len(chunk_queries),
-                "queries": chunk_queries,
-            }
+        chunk_file = chunk_dir / f"chunk-{chunk_index}.json"
+        chunk_file.write_text(
+            json.dumps(chunk_queries, ensure_ascii=False), encoding="utf-8"
         )
-    return entries
 
 
-def render_matrix_json(entries: Sequence[dict[str, Any]]) -> str:
-    """Render the matrix entries into a JSON string."""
-    payload = {"include": list(entries)}
+def render_matrix_json(chunk_count: int) -> str:
+    """Render a minimal matrix JSON listing chunk indexes only."""
+    payload = {"chunk_index": list(range(chunk_count))}
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -246,12 +243,9 @@ def main() -> None:
         help="Number of lists to split queries into for matrix output (default: 10)",
     )
     parser.add_argument(
-        "--matrix-output-key",
-        help="Emit the JSON strategy matrix to $GITHUB_OUTPUT using this key",
-    )
-    parser.add_argument(
-        "--matrix-output-file",
-        help="Optional path to write the JSON matrix payload for inspection",
+        "--chunk-dir",
+        required=True,
+        help="Directory to write per-chunk query files for downstream processing",
     )
     parser.add_argument(
         "--total-output-key",
@@ -325,25 +319,8 @@ def main() -> None:
             args.total_output_key,
         )
 
-    if args.matrix_output_key or args.matrix_output_file:
-        matrix_entries = build_strategy_matrix_entries(
-            sorted_queries, args.matrix_splits
-        )
-        matrix_json = render_matrix_json(matrix_entries)
-
-        if args.matrix_output_file:
-            matrix_file = Path(args.matrix_output_file)
-            matrix_file.parent.mkdir(parents=True, exist_ok=True)
-            matrix_file.write_text(matrix_json + "\n", encoding="utf-8")
-            pywikibot.info(
-                f"Wrote strategy matrix JSON with {len(matrix_entries)} entries to {matrix_file}"
-            )
-
-        if args.matrix_output_key:
-            write_github_output_value(args.matrix_output_key, matrix_json)
-            pywikibot.info(
-                f"Appended strategy matrix JSON to $GITHUB_OUTPUT with key {args.matrix_output_key}"
-            )
+    chunk_dir = Path(args.chunk_dir)
+    build_chunk_files(sorted_queries, args.matrix_splits, chunk_dir=chunk_dir)
 
 
 if __name__ == "__main__":

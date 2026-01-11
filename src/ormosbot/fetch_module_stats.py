@@ -104,32 +104,20 @@ def parse_int_env(name: str) -> int | None:
         raise RuntimeError(f"Environment variable {name} must be an integer") from exc
 
 
-def load_queries_from_env(env_var: str = "MATRIX_QUERIES_JSON") -> list[str]:
-    """Parse the chunked query list from the provided environment variable."""
-    try:
-        payload = os.environ[env_var]
-    except KeyError as exc:
-        raise RuntimeError(
-            f"Required environment variable {env_var} is missing"
-        ) from exc
-
-    try:
-        decoded = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Environment variable {env_var} does not contain valid JSON"
-        ) from exc
-
-    if not isinstance(decoded, list):
-        raise RuntimeError(
-            f"Environment variable {env_var} must decode to a list of queries"
-        )
-
+def load_queries_from_file(path_str: str) -> list[str]:
+    """Load queries from a JSON file containing a list of strings."""
+    path = Path(path_str)
+    if not path.exists():
+        raise RuntimeError(f"Query file {path} does not exist")
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, list):
+        raise RuntimeError(f"Query file {path} must contain a JSON list")
     queries: list[str] = []
-    for idx, item in enumerate(decoded):
+    for idx, item in enumerate(data):
         if not isinstance(item, str):
             raise RuntimeError(
-                f"Query at index {idx} in {env_var} is not a string: {item!r}"
+                f"Query at index {idx} in {path} is not a string: {item!r}"
             )
         queries.append(item)
     return queries
@@ -156,21 +144,15 @@ def main() -> None:
     args = parser.parse_args()
 
     chunk_index = require_env_int("MATRIX_CHUNK_INDEX")
-    chunk_total = require_env_int("MATRIX_CHUNK_TOTAL")
-    expected_query_count = parse_int_env("MATRIX_QUERY_COUNT")
-    queries = load_queries_from_env()
-
-    if expected_query_count is not None and expected_query_count != len(queries):
-        pywikibot.warning(
-            "Expected MATRIX_QUERY_COUNT=%d queries but parsed %d entries",
-            expected_query_count,
-            len(queries),
+    queries_file = os.environ.get("MATRIX_QUERIES_FILE")
+    if not queries_file:
+        raise RuntimeError(
+            "MATRIX_QUERIES_FILE must be set to the chunk query JSON file"
         )
-
+    queries = load_queries_from_file(queries_file)
     pywikibot.info(
-        "Shard %d/%d fetching %d queries",
-        chunk_index + 1,
-        chunk_total,
+        "Shard %d fetching %d queries",
+        chunk_index,
         len(queries),
     )
 
@@ -179,7 +161,6 @@ def main() -> None:
 
     payload = {
         "chunk_index": chunk_index,
-        "chunk_total": chunk_total,
         "query_count": len(queries),
         "stats": stats_mapping,
     }
