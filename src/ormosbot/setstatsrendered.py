@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import math
+import os
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -121,8 +124,8 @@ def register_page_queries(
 def dump_queries_to_file(
     queries: dict[str, list[str]],
     output_file: Path,
-) -> None:
-    """Dump the collected Scryfall queries to a JSON file."""
+) -> list[str]:
+    """Dump the collected Scryfall queries to a JSON file and return them."""
     sorted_queries = sorted(queries.keys())
     with output_file.open("w", encoding="utf-8") as f:
         json.dump(sorted_queries, f, indent=2, ensure_ascii=False)
@@ -130,6 +133,8 @@ def dump_queries_to_file(
 
     with output_file.with_suffix(".map").open("w", encoding="utf-8") as f:
         json.dump(queries, f, indent=2, ensure_ascii=False)
+
+    return sorted_queries
 
 
 def load_revision_cache(path: Path) -> dict[str, dict[str, Any]]:
@@ -150,6 +155,46 @@ def dump_revision_cache(cache: dict[str, dict[str, Any]], path: Path) -> None:
     """Persist page revision metadata."""
     with path.open("w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def build_chunk_files(
+    sorted_queries: Sequence[str],
+    chunk_count: int,
+    *,
+    chunk_dir: Path,
+) -> None:
+    """Split the queries into evenly sized chunks and write them to disk."""
+    chunk_count = max(1, chunk_count)
+    query_total = len(sorted_queries)
+    chunk_size = math.ceil(query_total / chunk_count) if query_total else 0
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    for chunk_index in range(chunk_count):
+        if chunk_size:
+            start = chunk_index * chunk_size
+            end = min(start + chunk_size, query_total)
+        else:
+            start = 0
+            end = 0
+        chunk_queries = list(sorted_queries[start:end])
+        chunk_file = chunk_dir / f"chunk-{chunk_index}.json"
+        chunk_file.write_text(
+            json.dumps(chunk_queries, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def render_matrix_json(chunk_count: int) -> str:
+    """Render a minimal matrix JSON listing chunk indexes only."""
+    payload = {"chunk_index": list(range(chunk_count))}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def write_github_output_value(key: str, value: str) -> None:
+    """Append a single-line value to the GitHub Actions output file."""
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        raise RuntimeError("GITHUB_OUTPUT environment variable is not set")
+    with Path(output_path).open("a", encoding="utf-8") as handle:
+        handle.write(f"{key}={value}\n")
 
 
 def current_revision_record(
@@ -192,6 +237,24 @@ def main() -> None:
         default="scryfall_revision_cache.json",
         help="Path to JSON file storing last processed revisions",
     )
+    parser.add_argument(
+        "--matrix-splits",
+        type=int,
+        default=10,
+        help="Number of lists to split queries into for matrix output (default: 10)",
+    )
+    parser.add_argument(
+        "--chunk-dir",
+        required=True,
+        help="Directory to write per-chunk query files for downstream processing",
+    )
+    parser.add_argument(
+        "--total-output-key",
+        help="Emit the total number of queries to $GITHUB_OUTPUT using this key",
+    )
+
+    Path("logs").mkdir(exist_ok=True)
+    logging.basicConfig(level=logging.DEBUG, filename="logs/setstatsrendered.log")
 
     # handle_args strips global Pywikibot flags before argparse sees them
     cli_args = _handle_args()
@@ -248,8 +311,20 @@ def main() -> None:
                 pywikibot.error(f"  TimeoutError processing {page_title}: {exc}")
                 continue
 
-    dump_queries_to_file(queries, output_file)
+    sorted_queries = dump_queries_to_file(queries, output_file)
     dump_revision_cache(revision_cache, revision_cache_path)
+
+    if args.total_output_key:
+        total_queries = len(sorted_queries)
+        write_github_output_value(args.total_output_key, str(total_queries))
+        pywikibot.info(
+            "Appended total query count (%d) to $GITHUB_OUTPUT with key %s",
+            total_queries,
+            args.total_output_key,
+        )
+
+    chunk_dir = Path(args.chunk_dir)
+    build_chunk_files(sorted_queries, args.matrix_splits, chunk_dir=chunk_dir)
 
 
 if __name__ == "__main__":

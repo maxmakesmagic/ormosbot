@@ -3,94 +3,18 @@
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
+from typing import Any
 
 import pywikibot
-import requests
-from tenacity import retry
-from tqdm import tqdm
 
-from ormosbot.cachedlimiter import CachedLimiterSession, get_session
+from ormosbot.colors import COLOR_ORDER
 from ormosbot.site import get_site
 
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
-COLOR_ORDER = ["c", "w", "u", "b", "r", "g", "m"]
-
-
-@retry
-def scryfall_query(session: CachedLimiterSession, query: str) -> requests.Response:
-    """Perform a Scryfall API search query and return the JSON response."""
-    log.info("Querying Scryfall API with query: %s", query)
-
-    if "+" in query:
-        with session.cache_disabled():
-            response = session.get(
-                "https://api.scryfall.com/cards/search",
-                timeout=10,
-                headers={"User-Agent": "OrmosBot/1.0"},
-                params={"q": query},
-            )
-    else:
-        response = session.get(
-            "https://api.scryfall.com/cards/search",
-            timeout=10,
-            headers={"User-Agent": "OrmosBot/1.0"},
-            params={"q": query},
-        )
-    return response
-
-
-def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str, int]:
-    """Fetch stats from Scryfall API"""
-    stats = {}
-
-    for color in COLOR_ORDER:
-        full_query = f"({query}) id={color}"
-        no_brackets = f"{query} id={color}"
-
-        log.debug("Fetching Scryfall stats for query: %s", full_query)
-        response = scryfall_query(session, full_query)
-        log.debug("Response status: %s", response.status_code)
-        if response.ok:
-            data = response.json()
-            log.debug("Total cards for %s: %s", color, data.get("total_cards", 0))
-            stats[color.lower()] = data.get("total_cards", 0)
-        elif response.status_code == 404:
-            log.debug("No cards found for query: %s", full_query)
-            stats[color.lower()] = 0
-        elif response.status_code == 400 and "Display options" in str(response.text):
-            log.info("Retrying without brackets for query: %s", no_brackets)
-            response = scryfall_query(session, no_brackets)
-            if response.ok:
-                data = response.json()
-                log.debug("Total cards for %s: %s", color, data.get("total_cards", 0))
-                stats[color.lower()] = data.get("total_cards", 0)
-            elif response.status_code == 404:
-                log.debug("No cards found for query: %s", no_brackets)
-                stats[color.lower()] = 0
-        else:
-            log.error(
-                "Error fetching stats for query %s: %s %s",
-                full_query,
-                response.status_code,
-                response.text,
-            )
-            stats[color.lower()] = 0
-
-    return stats
-
-
-def update_data_module(
-    session: CachedLimiterSession, queries: list[str]
-) -> dict[str, dict[str, str]]:
-    """Fetch stats for each query and return a mapping ready for serialization."""
-    results: dict[str, dict[str, str]] = {}
-    for query in tqdm(queries, desc="Updating stats"):
-        stats = fetch_scryfall_stats(session, query)
-        results[query] = {color: str(value) for color, value in stats.items()}
-    return results
 
 
 def lua_from_mapping(data: dict[str, dict[str, str]]) -> str:
@@ -129,6 +53,97 @@ def switch_from_mapping(data: dict[str, dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def load_stats_file(path: Path) -> dict[str, dict[str, str]]:
+    """Load and normalize the stats payload stored at the given path."""
+    with path.open("r", encoding="utf-8") as handle:
+        payload: Any = json.load(handle)
+
+    stats_obj: Any
+    if isinstance(payload, dict) and "stats" in payload:
+        stats_obj = payload["stats"]
+    else:
+        stats_obj = payload
+
+    if not isinstance(stats_obj, dict):
+        raise RuntimeError(f"Stats file {path} does not contain a mapping of queries")
+
+    normalized: dict[str, dict[str, str]] = {}
+    for query, color_counts in stats_obj.items():
+        if not isinstance(query, str):
+            raise RuntimeError(
+                f"Stats file {path} has a non-string query key: {query!r}"
+            )
+        if not isinstance(color_counts, dict):
+            raise RuntimeError(
+                f"Stats file {path} has a non-mapping entry for query {query!r}: {color_counts!r}"
+            )
+        normalized[query] = {color: str(value) for color, value in color_counts.items()}
+    return normalized
+
+
+def merge_stats_from_dir(stats_dir: Path) -> dict[str, dict[str, str]]:
+    """Merge all shard stats JSON files from the provided directory."""
+    if not stats_dir.exists():
+        raise RuntimeError(f"Stats directory {stats_dir} does not exist")
+
+    json_files = sorted(p for p in stats_dir.rglob("*.json") if p.is_file())
+    pywikibot.info(
+        "Found %d stats JSON files under %s",
+        len(json_files),
+        stats_dir,
+    )
+    for shard_path in json_files:
+        pywikibot.info(" - %s", shard_path)
+    if not json_files:
+        raise RuntimeError(f"No stats JSON files found under {stats_dir}")
+
+    combined: dict[str, dict[str, str]] = {}
+    for shard_file in json_files:
+        shard_stats = load_stats_file(shard_file)
+        overlap = combined.keys() & shard_stats.keys()
+        if overlap:
+            pywikibot.warning(
+                "Stats file %s overlaps %d queries; overwriting with latest data",
+                shard_file,
+                len(overlap),
+            )
+        combined.update(shard_stats)
+        pywikibot.info(
+            "Merged %s containing %d queries (running total: %d)",
+            shard_file,
+            len(shard_stats),
+            len(combined),
+        )
+
+    pywikibot.info(
+        "Merged %d shard files yielding %d unique queries",
+        len(json_files),
+        len(combined),
+    )
+    return combined
+
+
+def should_update_wiki(env_var: str = "UPDATE_WIKI") -> bool:
+    """Return True if the environment variable indicates wiki updates should run."""
+    raw_value = os.environ.get(env_var)
+    if raw_value is None:
+        return False
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_expected_total(env_var: str = "EXPECTED_QUERY_TOTAL") -> int | None:
+    """Parse the expected total query count from the environment, if provided."""
+    raw_value = os.environ.get(env_var)
+    if raw_value is None or not raw_value.strip():
+        return None
+    try:
+        return int(raw_value.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable {env_var} must be an integer, got {raw_value!r}"
+        ) from exc
+
+
 def main() -> None:
     """Main entry point for update-module-data."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -144,31 +159,33 @@ def main() -> None:
         help="Path to config.json providing HTTP headers",
     )
     parser.add_argument(
-        "--input-file",
-        default="scryfall_queries.json",
-        help="Path to input JSON file for queries",
+        "--stats-dir",
+        default="shard-stats",
+        help="Directory containing shard JSON files to merge",
     )
 
     args = parser.parse_args()
     config_path = Path(args.config)
+    stats_dir = Path(args.stats_dir)
 
-    site = get_site(config_path, lang=args.site, family=args.family)
-    site.login()
-
+    Path("logs").mkdir(exist_ok=True)
     logging.basicConfig(
-        level=logging.DEBUG, filename="update_module_data.log", filemode="w"
+        level=logging.DEBUG, filename="logs/update_module_data.log", filemode="w"
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-    # Load the queries from the input file
-    input_file = Path(args.input_file)
-    with input_file.open("r", encoding="utf-8") as f:
-        queries = set(json.load(f))
-    pywikibot.info(f"Loaded {len(queries)} queries from {input_file}")
-
-    session = get_session()
-
-    stats_mapping = update_data_module(session, sorted(queries))
+    stats_mapping = merge_stats_from_dir(stats_dir)
+    expected_total = parse_expected_total()
+    actual_total = len(stats_mapping)
+    if expected_total is not None:
+        if actual_total != expected_total:
+            raise RuntimeError(
+                f"Expected {expected_total} queries but merged {actual_total}"
+            )
+        pywikibot.info(
+            "Verified merged stats contain the expected %d queries",
+            expected_total,
+        )
     lua_code = lua_from_mapping(stats_mapping)
 
     # Write the lua code to file
@@ -183,10 +200,19 @@ def main() -> None:
         f.write(switch_code)
     pywikibot.info(f"Wrote switch template data to {switch_path}")
 
-    # Save to wiki
-    page = pywikibot.Page(site, "Template:Scryfall stats/data")
-    page.text = switch_code
-    page.save("Updated Scryfall stats data via OrmosBot")
+    update_wiki = should_update_wiki()
+    if update_wiki:
+        site = get_site(config_path, lang=args.site, family=args.family)
+        site.login()
+
+        page = pywikibot.Page(site, "Template:Scryfall stats/data")
+        page.text = switch_code
+        page.save("Updated Scryfall stats data via OrmosBot")
+        pywikibot.info("Uploaded merged stats to Template:Scryfall stats/data")
+    else:
+        pywikibot.info(
+            "UPDATE_WIKI is not true; skipping wiki edit. Generated outputs locally instead."
+        )
 
 
 if __name__ == "__main__":
