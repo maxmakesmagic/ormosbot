@@ -160,7 +160,14 @@ def main() -> None:
     args = parser.parse_args()
 
     Path("logs").mkdir(exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, filename="logs/fetch_module_stats.log")
+    file_handler = logging.FileHandler("logs/fetch_module_stats.log", encoding="utf-8")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.WARNING)
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[file_handler, stream_handler],
+    )
 
     chunk_index = require_env_int("MATRIX_CHUNK_INDEX")
     queries_file = os.environ.get("MATRIX_QUERIES_FILE")
