@@ -19,7 +19,8 @@ def get_session() -> CachedLimiterSession:
 
     """
     session = CachedLimiterSession(
-        per_second=5,
+        # Limit to 1 request per second so it's 10/s across 10 jobs
+        per_second=1,
         expire_after=timedelta(days=7),
         allowable_codes=[200, 400, 404],
         cache_name="cache.db",

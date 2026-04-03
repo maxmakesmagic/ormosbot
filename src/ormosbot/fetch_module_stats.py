@@ -60,6 +60,14 @@ def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str,
         elif response.status_code == 404:
             log.debug("No cards found for query: %s", full_query)
             stats[color.lower()] = 0
+        elif response.status_code == 429:
+            retry_after = response.headers.get("Retry-After", "unknown")
+            log.warning(
+                "Scryfall rate limited query %s (429). Retry-After: %s",
+                full_query,
+                retry_after,
+            )
+            stats[color.lower()] = 0
         elif response.status_code == 400 and "Display options" in str(response.text):
             log.info("Retrying without brackets for query: %s", no_brackets)
             response = scryfall_query(session, no_brackets)
@@ -69,6 +77,14 @@ def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str,
                 stats[color.lower()] = data.get("total_cards", 0)
             elif response.status_code == 404:
                 log.debug("No cards found for query: %s", no_brackets)
+                stats[color.lower()] = 0
+            elif response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "unknown")
+                log.warning(
+                    "Scryfall rate limited query %s (429). Retry-After: %s",
+                    no_brackets,
+                    retry_after,
+                )
                 stats[color.lower()] = 0
         else:
             log.error(
