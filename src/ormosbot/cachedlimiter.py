@@ -19,7 +19,7 @@ def get_session() -> CachedLimiterSession:
 
     """
     session = CachedLimiterSession(
-        per_second=10,
+        per_second=5,
         expire_after=timedelta(days=7),
         allowable_codes=[200, 400, 404],
         cache_name="cache.db",
