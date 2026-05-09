@@ -17,6 +17,13 @@ log = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
 
 
+def escape_switch_case_value(value: str) -> str:
+    """Escape parser-significant characters inside a #switch case label."""
+    placeholder = "\x00ORMOSBOT_EQUALS\x00"
+    preserved = value.replace("{{=}}", placeholder)
+    return preserved.replace("=", "{{=}}").replace(placeholder, "{{=}}")
+
+
 def lua_from_mapping(data: dict[str, dict[str, str]]) -> str:
     """Render the stats mapping into Lua source code."""
     lines = ["-- Auto-generated data. Edit carefully.", "return {"]
@@ -37,7 +44,7 @@ def switch_from_mapping(data: dict[str, dict[str, str]]) -> str:
         "{{#switch:{{lc:{{{query|}}}}}",
     ]
     for query, stats in data.items():
-        normalized = query.casefold()
+        normalized = escape_switch_case_value(query.casefold())
         values: list[int] = []
         for color in COLOR_ORDER:
             value = int(stats.get(color, "0"))
