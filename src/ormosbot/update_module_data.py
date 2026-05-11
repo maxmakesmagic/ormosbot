@@ -17,11 +17,27 @@ log = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
 
 
+_SWITCH_ESCAPES: dict[str, str] = {
+    "=": "EQUALS",
+    "|": "PIPE",
+}
+
+_SWITCH_REPLACEMENTS: dict[str, str] = {
+    "EQUALS": "=",
+    "PIPE": "!",
+}
+
+
 def escape_switch_case_value(value: str) -> str:
     """Escape parser-significant characters inside a #switch case label."""
-    placeholder = "\x00ORMOSBOT_EQUALS\x00"
-    preserved = value.replace("{{=}}", placeholder)
-    return preserved.replace("=", "{{=}}").replace(placeholder, "{{=}}")
+    result = value
+    for char, placeholder in _SWITCH_ESCAPES.items():
+        result = result.replace("{{" + _SWITCH_REPLACEMENTS[placeholder] + "}}", placeholder)
+    for char, placeholder in _SWITCH_ESCAPES.items():
+        result = result.replace(char, "{{" + _SWITCH_REPLACEMENTS[placeholder] + "}}")
+    for placeholder, rep_char in _SWITCH_REPLACEMENTS.items():
+        result = result.replace(placeholder, "{{" + rep_char + "}}")
+    return result
 
 
 def lua_from_mapping(data: dict[str, dict[str, str]]) -> str:
