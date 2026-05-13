@@ -15,7 +15,10 @@ from typing import Any
 import pywikibot
 from pywikibot.site import BaseSite
 
-from ormosbot.scryfall_query_inspection import extract_scryfall_queries_from_html
+from ormosbot.scryfall_query_inspection import (
+    detect_scryfall_queries_from_html,
+    filter_structured_scryfall_queries,
+)
 from ormosbot.site import get_site
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -31,9 +34,12 @@ TEMPLATES_TO_CHECK = [
     "Template:Scryfall count",
 ]
 TEMPLATE_NAMESPACE = 10
-# Bump this when query discovery semantics change and cached page queries
-# should be recomputed even if the underlying wiki revision is unchanged.
-QUERY_CACHE_VERSION = 2
+# Bump this when raw Scryfall-link detection semantics change and cached
+# detected queries should be recomputed from rendered page HTML.
+DETECTED_QUERY_CACHE_VERSION = 1
+# Bump this when structured-query filtering semantics change. Matching pages can
+# then reuse cached detected queries without refetching unchanged wiki pages.
+QUERY_CACHE_VERSION = 3
 
 
 try:
@@ -109,17 +115,20 @@ class ScryfallTemplateUsageGenerator:
         )
 
 
-def process_page(site: BaseSite, page: pywikibot.Page) -> list[str]:
-    """Return all unique Scryfall queries referenced on the page."""
+def process_page(site: BaseSite, page: pywikibot.Page) -> tuple[list[str], list[str]]:
+    """Return detected and structured Scryfall queries referenced on the page."""
     page_title = str(page.title()).strip()
     pywikibot.info(f"Processing page: {page_title}")
 
     # Get the fully rendered content of the page (HTML-expanded)
     parsed_page = page.get_parsed_page()
-    page_queries = extract_scryfall_queries_from_html(parsed_page)
+    detected_queries = detect_scryfall_queries_from_html(parsed_page)
+    page_queries = filter_structured_scryfall_queries(detected_queries)
+    for search in detected_queries:
+        pywikibot.debug(f"  Detected Scryfall query: {search}")
     for search in page_queries:
-        pywikibot.info(f"  Found Scryfall query: {search}")
-    return page_queries
+        pywikibot.info(f"  Using structured Scryfall query: {search}")
+    return detected_queries, page_queries
 
 
 def register_page_queries(
@@ -209,6 +218,7 @@ def write_github_output_value(key: str, value: str) -> None:
 def current_revision_record(
     page: pywikibot.Page,
     rev_id: int | None = None,
+    detected_page_queries: Sequence[str] | None = None,
     page_queries: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Build a serializable record for the page's latest revision."""
@@ -219,22 +229,38 @@ def current_revision_record(
     record: dict[str, Any] = {
         "rev_id": rev_id,
         "timestamp": timestamp,
+        "detected_query_cache_version": DETECTED_QUERY_CACHE_VERSION,
         "query_cache_version": QUERY_CACHE_VERSION,
     }
+    if detected_page_queries is not None:
+        record["detected_queries"] = list(detected_page_queries)
     if page_queries is not None:
         record["queries"] = list(page_queries)
     return record
+
+
+def cached_detected_revision_matches(
+    cached_revision: dict[str, Any] | None,
+    latest_rev_id: int,
+) -> bool:
+    """Return whether cached detected queries can be reused."""
+    if not cached_revision:
+        return False
+    if cached_revision.get("rev_id") != latest_rev_id:
+        return False
+    if cached_revision.get("detected_query_cache_version") != DETECTED_QUERY_CACHE_VERSION:
+        return False
+    return isinstance(cached_revision.get("detected_queries"), list)
 
 
 def cached_revision_matches(
     cached_revision: dict[str, Any] | None,
     latest_rev_id: int,
 ) -> bool:
-    """Return whether a cached revision record can be reused."""
-    if not cached_revision:
+    """Return whether a cached revision record can be fully reused."""
+    if not cached_detected_revision_matches(cached_revision, latest_rev_id):
         return False
-    if cached_revision.get("rev_id") != latest_rev_id:
-        return False
+    assert cached_revision is not None
     return cached_revision.get("query_cache_version") == QUERY_CACHE_VERSION
 
 
@@ -324,19 +350,38 @@ def main() -> None:
                 )
                 register_page_queries(page_title, cached_queries, queries)
                 continue
-        elif cached_revision and cached_revision.get("rev_id") == latest_rev_id:
+        elif cached_detected_revision_matches(cached_revision, latest_rev_id):
+            assert cached_revision is not None
+            cached_detected_queries = cached_revision.get("detected_queries")
+            assert isinstance(cached_detected_queries, list)
+            page_queries = filter_structured_scryfall_queries(cached_detected_queries)
             pywikibot.info(
-                "  Reprocessing %s due to query cache version mismatch (%s != %s)",
+                "  Recomputing structured queries for %s from cached detected links (%s != %s)",
                 page_title,
                 cached_revision.get("query_cache_version"),
                 QUERY_CACHE_VERSION,
             )
-
-        try:
-            page_queries = process_page(site, page)
             register_page_queries(page_title, page_queries, queries)
             revision_cache[page_title] = current_revision_record(
-                page, latest_rev_id, page_queries
+                page,
+                latest_rev_id,
+                cached_detected_queries,
+                page_queries,
+            )
+            continue
+        elif cached_revision and cached_revision.get("rev_id") == latest_rev_id:
+            pywikibot.info(
+                "  Reprocessing %s due to detected-query cache version mismatch (%s != %s)",
+                page_title,
+                cached_revision.get("detected_query_cache_version"),
+                DETECTED_QUERY_CACHE_VERSION,
+            )
+
+        try:
+            detected_queries, page_queries = process_page(site, page)
+            register_page_queries(page_title, page_queries, queries)
+            revision_cache[page_title] = current_revision_record(
+                page, latest_rev_id, detected_queries, page_queries
             )
             if (idx + 1) % 100 == 0:
                 pywikibot.info(f"Processed {idx + 1} pages...")
