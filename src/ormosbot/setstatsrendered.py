@@ -7,16 +7,15 @@ import json
 import logging
 import math
 import os
-from collections.abc import Iterable, Iterator, Sequence
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
-import bs4
 import pywikibot
-from mwparserfromhell.nodes.extras.parameter import Parameter
 from pywikibot.site import BaseSite
 
+from ormosbot.scryfall_query_inspection import extract_scryfall_queries_from_html
 from ormosbot.site import get_site
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +30,7 @@ TEMPLATES_TO_CHECK = [
     "Template:Scryfall stats",
     "Template:Scryfall count",
 ]
+TEMPLATE_NAMESPACE = 10
 
 
 try:
@@ -39,8 +39,46 @@ except AttributeError:  # Pywikibot < 9 kept camelCase helper
     _handle_args = pywikibot.handleArgs  # type: ignore[attr-defined]
 
 
+def collect_recursive_template_usage(
+    root_template_titles: Sequence[str],
+    transclusion_provider: Callable[[str], Iterable[pywikibot.Page]],
+    namespaces: Sequence[int] | None = None,
+) -> Iterator[pywikibot.Page]:
+    """Yield non-template pages that transitively include the root templates."""
+    seen_templates: set[str] = set()
+    yielded_pages: set[str] = set()
+    pending_templates = deque(root_template_titles)
+
+    while pending_templates:
+        template_title = pending_templates.popleft()
+        if template_title in seen_templates:
+            continue
+        seen_templates.add(template_title)
+        pywikibot.info(f"Expanding template transclusions for {template_title}")
+
+        for page in transclusion_provider(template_title):
+            page_title = str(page.title())
+            page_namespace = int(page.namespace())
+            if page_namespace == TEMPLATE_NAMESPACE:
+                if page_title not in seen_templates:
+                    pywikibot.info(
+                        f"  Found parent template {page_title} via {template_title}"
+                    )
+                    pending_templates.append(page_title)
+                continue
+            if namespaces is not None and page_namespace not in namespaces:
+                continue
+            if page_title in yielded_pages:
+                continue
+            yielded_pages.add(page_title)
+            pywikibot.debug(
+                f"  Yielding page {page_title} from template closure rooted at {template_title}"
+            )
+            yield page
+
+
 class ScryfallTemplateUsageGenerator:
-    """Iterate over pages that transclude a given template."""
+    """Iterate over pages that directly or indirectly use Scryfall templates."""
 
     def __init__(
         self,
@@ -55,23 +93,17 @@ class ScryfallTemplateUsageGenerator:
         self.template_title = template_title
 
     def __iter__(self) -> Iterator[pywikibot.Page]:
-        """Yield pages that include the template."""
-        template_page = pywikibot.Page(self.site, self.template_title)
-        embedded_pages = template_page.embeddedin(namespaces=self.namespaces)
-        yield from embedded_pages
+        """Yield pages that include the template, following template transclusions."""
 
+        def transclusion_provider(title: str) -> Iterable[pywikibot.Page]:
+            template_page = pywikibot.Page(self.site, title)
+            yield from template_page.embeddedin()
 
-def normalize_template_name(name: str) -> str:
-    """Normalize a template name for matching."""
-    # Remove the Template: prefix and normalize spaces/underscores and case.
-    if name.lower().startswith("template:"):
-        name = name[9:]
-    return name.strip().lower().replace(" ", "_")
-
-
-def clean_value(param: Parameter) -> str:
-    """Clean a parameter value by stripping."""
-    return str(param.value).strip()
+        yield from collect_recursive_template_usage(
+            [self.template_title],
+            transclusion_provider,
+            namespaces=self.namespaces,
+        )
 
 
 def process_page(site: BaseSite, page: pywikibot.Page) -> list[str]:
@@ -81,36 +113,10 @@ def process_page(site: BaseSite, page: pywikibot.Page) -> list[str]:
 
     # Get the fully rendered content of the page (HTML-expanded)
     parsed_page = page.get_parsed_page()
-
-    # Use beautifulsoup to extract all external links from the rendered HTML
-    soup = bs4.BeautifulSoup(parsed_page, "html.parser")
-
-    page_queries: set[str] = set()
-
-    for link in soup.find_all("a", href=True):
-        url = str(link.attrs["href"])
-
-        if "scryfall.com/search?q=" in url:
-            pywikibot.debug(f"MD: url is {url}")
-            parsed_url = urlparse(url)
-            query_params = parse_qs(parsed_url.query)
-            pywikibot.debug(f"  query_params: {query_params}")
-
-            if "q" in query_params and "utm_source" not in query_params:
-                # skip links that have both q and utm_source (these are likely
-                # tracking links, not direct search links)
-                search = query_params["q"][0]
-
-                # Skip any searches that don't have colons (:) in them
-                if ":" not in search:
-                    pywikibot.info(f"  Skipping non-colon search link: {search}")
-                    continue
-
-                pywikibot.info(f"  Found Scryfall query: {search}")
-
-                page_queries.add(search)
-
-    return sorted(page_queries)
+    page_queries = extract_scryfall_queries_from_html(parsed_page)
+    for search in page_queries:
+        pywikibot.info(f"  Found Scryfall query: {search}")
+    return page_queries
 
 
 def register_page_queries(
@@ -270,46 +276,47 @@ def main() -> None:
     seen_pages: set[str] = set()
     queries: dict[str, list[str]] = {}
 
-    for template_title in TEMPLATES_TO_CHECK:
-        pywikibot.info(f"Processing template: {template_title}")
-        scryfall_generator = ScryfallTemplateUsageGenerator(
-            site=site, template_title=template_title
+    pywikibot.info(
+        "Processing transitive template closure for %s", ", ".join(TEMPLATES_TO_CHECK)
+    )
+    for idx, page in enumerate(
+        collect_recursive_template_usage(
+            TEMPLATES_TO_CHECK,
+            lambda title: pywikibot.Page(site, title).embeddedin(),
         )
-        for idx, page in enumerate(scryfall_generator):
-            page_title = str(page.title())
-            if page_title in seen_pages:
-                continue
-            seen_pages.add(page_title)
+    ):
+        page_title = str(page.title())
+        if page_title in seen_pages:
+            continue
+        seen_pages.add(page_title)
 
-            latest_rev_id = page.latest_revision_id
-            cached_revision = revision_cache.get(page_title)
-            if cached_revision and cached_revision.get("rev_id") == latest_rev_id:
-                cached_queries = cached_revision.get("queries")
-                if cached_queries is None:
-                    pywikibot.info(
-                        f"  Cache missing queries for {page_title}; reprocessing"
-                    )
-                else:
-                    pywikibot.info(
-                        f"  Skipping unchanged page: {page_title} (rev {latest_rev_id})"
-                    )
-                    register_page_queries(page_title, cached_queries, queries)
-                    continue
-
-            try:
-                page_queries = process_page(site, page)
-                register_page_queries(page_title, page_queries, queries)
-                revision_cache[page_title] = current_revision_record(
-                    page, latest_rev_id, page_queries
+        latest_rev_id = page.latest_revision_id
+        cached_revision = revision_cache.get(page_title)
+        if cached_revision and cached_revision.get("rev_id") == latest_rev_id:
+            cached_queries = cached_revision.get("queries")
+            if cached_queries is None:
+                pywikibot.info(f"  Cache missing queries for {page_title}; reprocessing")
+            else:
+                pywikibot.info(
+                    f"  Skipping unchanged page: {page_title} (rev {latest_rev_id})"
                 )
-                if (idx + 1) % 100 == 0:
-                    pywikibot.info(f"Processed {idx + 1} pages...")
-                    pywikibot.info(f"  Current queries: {len(queries)}")
-                    dump_queries_to_file(queries, output_file)
-                    dump_revision_cache(revision_cache, revision_cache_path)
-            except pywikibot.exceptions.TimeoutError as exc:
-                pywikibot.error(f"  TimeoutError processing {page_title}: {exc}")
+                register_page_queries(page_title, cached_queries, queries)
                 continue
+
+        try:
+            page_queries = process_page(site, page)
+            register_page_queries(page_title, page_queries, queries)
+            revision_cache[page_title] = current_revision_record(
+                page, latest_rev_id, page_queries
+            )
+            if (idx + 1) % 100 == 0:
+                pywikibot.info(f"Processed {idx + 1} pages...")
+                pywikibot.info(f"  Current queries: {len(queries)}")
+                dump_queries_to_file(queries, output_file)
+                dump_revision_cache(revision_cache, revision_cache_path)
+        except pywikibot.exceptions.TimeoutError as exc:
+            pywikibot.error(f"  TimeoutError processing {page_title}: {exc}")
+            continue
 
     sorted_queries = dump_queries_to_file(queries, output_file)
     dump_revision_cache(revision_cache, revision_cache_path)
