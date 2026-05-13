@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from urllib.parse import parse_qs, urlparse
 
@@ -47,11 +48,11 @@ def normalize_template_name(name: str) -> str:
     return name.strip().lower().replace("_", " ")
 
 
-def extract_scryfall_queries_from_html(parsed_page: str) -> list[str]:
-    """Extract unique direct Scryfall search queries from rendered page HTML."""
+def detect_scryfall_queries_from_html(parsed_page: str) -> list[str]:
+    """Detect all direct Scryfall search queries from rendered page HTML."""
     # Use beautifulsoup to extract all external links from the rendered HTML.
     soup = bs4.BeautifulSoup(parsed_page, "html.parser")
-    page_queries: set[str] = set()
+    detected_queries: set[str] = set()
 
     for link in soup.find_all("a", href=True):
         url = str(link.attrs["href"])
@@ -66,13 +67,22 @@ def extract_scryfall_queries_from_html(parsed_page: str) -> list[str]:
             continue
 
         search = query_params["q"][0]
-        # Skip loose text searches and keep only structured Scryfall queries.
-        if not is_structured_scryfall_query(search):
-            continue
+        detected_queries.add(search)
 
-        page_queries.add(search)
+    return sorted(detected_queries)
 
-    return sorted(page_queries)
+
+def filter_structured_scryfall_queries(queries: Iterable[str]) -> list[str]:
+    """Filter detected Scryfall queries down to the structured ones the bot uses."""
+    return sorted({query for query in queries if is_structured_scryfall_query(query)})
+
+
+def extract_scryfall_queries_from_html(parsed_page: str) -> list[str]:
+    """Extract unique structured Scryfall search queries from rendered page HTML."""
+    detected_queries = detect_scryfall_queries_from_html(parsed_page)
+
+    # Skip loose text searches and keep only structured Scryfall queries.
+    return filter_structured_scryfall_queries(detected_queries)
 
 
 def is_query_like_value(value: str) -> bool:

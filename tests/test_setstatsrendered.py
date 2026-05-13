@@ -1,6 +1,11 @@
 """Tests for setstatsrendered cache invalidation helpers."""
 
-from ormosbot.setstatsrendered import QUERY_CACHE_VERSION, cached_revision_matches
+from ormosbot.setstatsrendered import (
+    DETECTED_QUERY_CACHE_VERSION,
+    QUERY_CACHE_VERSION,
+    cached_detected_revision_matches,
+    cached_revision_matches,
+)
 
 
 class TestCachedRevisionMatches:
@@ -10,11 +15,25 @@ class TestCachedRevisionMatches:
         """Cache entries match only when both revision and extractor version match."""
         cached_revision = {
             "rev_id": 123,
+            "detected_query_cache_version": DETECTED_QUERY_CACHE_VERSION,
             "query_cache_version": QUERY_CACHE_VERSION,
+            "detected_queries": ['color="WB"'],
             "queries": ['color="WB"'],
         }
 
         assert cached_revision_matches(cached_revision, 123) is True
+
+    def test_detected_cache_can_match_without_query_cache_version(self) -> None:
+        """Detected queries can be reused even when filtered-query cache is stale."""
+        cached_revision = {
+            "rev_id": 123,
+            "detected_query_cache_version": DETECTED_QUERY_CACHE_VERSION,
+            "detected_queries": ['color="WB"'],
+            "query_cache_version": QUERY_CACHE_VERSION - 1,
+        }
+
+        assert cached_detected_revision_matches(cached_revision, 123) is True
+        assert cached_revision_matches(cached_revision, 123) is False
 
     def test_rejects_same_revision_without_cache_version(self) -> None:
         """Older cache entries are invalidated after extractor changes."""
@@ -29,6 +48,8 @@ class TestCachedRevisionMatches:
         """Revision mismatches still invalidate the cache."""
         cached_revision = {
             "rev_id": 122,
+            "detected_query_cache_version": DETECTED_QUERY_CACHE_VERSION,
+            "detected_queries": ['color="WB"'],
             "query_cache_version": QUERY_CACHE_VERSION,
         }
 

@@ -1,14 +1,38 @@
 """Tests for Scryfall query extraction and missing-query diagnostics."""
 
 from ormosbot.scryfall_query_inspection import (
+    detect_scryfall_queries_from_html,
     determine_missing_query_reason,
     extract_scryfall_queries_from_html,
+    filter_structured_scryfall_queries,
     inspect_scryfall_templates_in_wikitext,
 )
 
 
+class TestDetectScryfallQueriesFromHtml:
+    """Tests for raw rendered Scryfall query detection."""
+
+    def test_detects_all_direct_queries_except_tracking_links(self) -> None:
+        """Keeps direct search links before structured-query filtering."""
+        html = """
+        <div>
+          <a href="https://scryfall.com/search?q=t%3Acreature">Creatures</a>
+          <a href="https://scryfall.com/search?q=color%3D%22WB%22">White-black</a>
+          <a href="https://scryfall.com/search?q=cmc%3E3&utm_source=mtgwiki">Tracked</a>
+          <a href="https://example.com/elsewhere">Elsewhere</a>
+          <a href="https://scryfall.com/search?q=angel">Plain text</a>
+        </div>
+        """
+
+        assert detect_scryfall_queries_from_html(html) == [
+            "angel",
+            'color="WB"',
+            "t:creature",
+        ]
+
+
 class TestExtractScryfallQueriesFromHtml:
-    """Tests for rendered Scryfall query extraction."""
+    """Tests for structured rendered Scryfall query extraction."""
 
     def test_extracts_direct_queries_only(self) -> None:
         """Keeps structured direct search links and skips tracking/plain text."""
@@ -23,6 +47,19 @@ class TestExtractScryfallQueriesFromHtml:
         """
 
         assert extract_scryfall_queries_from_html(html) == [
+            'color="WB"',
+            "t:creature",
+        ]
+
+
+class TestFilterStructuredScryfallQueries:
+    """Tests for structured-query filtering after raw detection."""
+
+    def test_filters_plain_text_queries(self) -> None:
+        """Plain-text detections are excluded from the final structured query set."""
+        queries = ['color="WB"', "angel", "t:creature"]
+
+        assert filter_structured_scryfall_queries(queries) == [
             'color="WB"',
             "t:creature",
         ]
