@@ -11,17 +11,21 @@ class TestExtractScryfallQueriesFromHtml:
     """Tests for rendered Scryfall query extraction."""
 
     def test_extracts_direct_queries_only(self) -> None:
-        """Keeps direct search links and skips tracking and non-query URLs."""
+        """Keeps structured direct search links and skips tracking/plain text."""
         html = """
         <div>
           <a href="https://scryfall.com/search?q=t%3Acreature">Creatures</a>
+          <a href="https://scryfall.com/search?q=color%3D%22WB%22">White-black</a>
           <a href="https://scryfall.com/search?q=cmc%3E3&utm_source=mtgwiki">Tracked</a>
           <a href="https://example.com/elsewhere">Elsewhere</a>
           <a href="https://scryfall.com/search?q=angel">No colon</a>
         </div>
         """
 
-        assert extract_scryfall_queries_from_html(html) == ["t:creature"]
+        assert extract_scryfall_queries_from_html(html) == [
+            'color="WB"',
+            "t:creature",
+        ]
 
 
 class TestInspectScryfallTemplatesInWikitext:
@@ -36,6 +40,15 @@ class TestInspectScryfallTemplatesInWikitext:
         assert len(inspections) == 1
         assert inspections[0].normalized_name == "scryfall stats"
         assert inspections[0].query_like_values == ["t:creature mv:3"]
+
+    def test_accepts_equals_based_scryfall_queries(self) -> None:
+        """Structured queries using equals are kept as query-like values."""
+        wikitext = '{{Scryfall count|1=color="WB"}}'
+
+        inspections = inspect_scryfall_templates_in_wikitext(wikitext)
+
+        assert len(inspections) == 1
+        assert inspections[0].query_like_values == ['color="WB"']
 
 
 class TestDetermineMissingQueryReason:

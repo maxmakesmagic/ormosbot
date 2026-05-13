@@ -28,6 +28,17 @@ class TemplateInspection:
     query_like_values: list[str]
 
 
+def is_structured_scryfall_query(value: str) -> bool:
+    """Return whether a value looks like a structured Scryfall query."""
+    stripped = value.strip()
+    if not stripped:
+        return False
+
+    # Structured Scryfall searches commonly use field operators like
+    # `t:creature`, `color="WB"`, or range comparisons such as `mv<=3`.
+    return any(operator in stripped for operator in (":", "=", "<", ">"))
+
+
 def normalize_template_name(name: str) -> str:
     """Normalize a template name for matching."""
     # Remove the Template: prefix and normalize spaces/underscores and case.
@@ -55,9 +66,8 @@ def extract_scryfall_queries_from_html(parsed_page: str) -> list[str]:
             continue
 
         search = query_params["q"][0]
-        # Skip any searches that don't have colons (:), which filters out loose
-        # text searches that are not part of the structured query set.
-        if ":" not in search:
+        # Skip loose text searches and keep only structured Scryfall queries.
+        if not is_structured_scryfall_query(search):
             continue
 
         page_queries.add(search)
@@ -70,7 +80,7 @@ def is_query_like_value(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return False
-    if ":" not in stripped:
+    if not is_structured_scryfall_query(stripped):
         return False
     if stripped.startswith(("http://", "https://")):
         return False
