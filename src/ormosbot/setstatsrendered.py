@@ -31,6 +31,9 @@ TEMPLATES_TO_CHECK = [
     "Template:Scryfall count",
 ]
 TEMPLATE_NAMESPACE = 10
+# Bump this when query discovery semantics change and cached page queries
+# should be recomputed even if the underlying wiki revision is unchanged.
+QUERY_CACHE_VERSION = 2
 
 
 try:
@@ -213,10 +216,26 @@ def current_revision_record(
     timestamp = revision.timestamp.isoformat() if revision else None
     if rev_id is None:
         rev_id = page.latest_revision_id
-    record: dict[str, Any] = {"rev_id": rev_id, "timestamp": timestamp}
+    record: dict[str, Any] = {
+        "rev_id": rev_id,
+        "timestamp": timestamp,
+        "query_cache_version": QUERY_CACHE_VERSION,
+    }
     if page_queries is not None:
         record["queries"] = list(page_queries)
     return record
+
+
+def cached_revision_matches(
+    cached_revision: dict[str, Any] | None,
+    latest_rev_id: int,
+) -> bool:
+    """Return whether a cached revision record can be reused."""
+    if not cached_revision:
+        return False
+    if cached_revision.get("rev_id") != latest_rev_id:
+        return False
+    return cached_revision.get("query_cache_version") == QUERY_CACHE_VERSION
 
 
 def main() -> None:
@@ -292,16 +311,26 @@ def main() -> None:
 
         latest_rev_id = page.latest_revision_id
         cached_revision = revision_cache.get(page_title)
-        if cached_revision and cached_revision.get("rev_id") == latest_rev_id:
+        if cached_revision_matches(cached_revision, latest_rev_id):
+            assert cached_revision is not None
             cached_queries = cached_revision.get("queries")
             if cached_queries is None:
-                pywikibot.info(f"  Cache missing queries for {page_title}; reprocessing")
+                pywikibot.info(
+                    f"  Cache missing queries for {page_title}; reprocessing"
+                )
             else:
                 pywikibot.info(
                     f"  Skipping unchanged page: {page_title} (rev {latest_rev_id})"
                 )
                 register_page_queries(page_title, cached_queries, queries)
                 continue
+        elif cached_revision and cached_revision.get("rev_id") == latest_rev_id:
+            pywikibot.info(
+                "  Reprocessing %s due to query cache version mismatch (%s != %s)",
+                page_title,
+                cached_revision.get("query_cache_version"),
+                QUERY_CACHE_VERSION,
+            )
 
         try:
             page_queries = process_page(site, page)
