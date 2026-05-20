@@ -86,6 +86,82 @@ def collect_recursive_template_usage(
             yield page
 
 
+def collect_recursive_template_titles(
+    root_template_titles: Sequence[str],
+    transclusion_provider: Callable[[str], Iterable[pywikibot.Page]],
+) -> set[str]:
+    """Return template titles reachable from the given roots via transclusion."""
+    seen_templates: set[str] = set()
+    pending_templates = deque(root_template_titles)
+
+    while pending_templates:
+        template_title = pending_templates.popleft()
+        if template_title in seen_templates:
+            continue
+        seen_templates.add(template_title)
+
+        for page in transclusion_provider(template_title):
+            if int(page.namespace()) != TEMPLATE_NAMESPACE:
+                continue
+            page_title = str(page.title())
+            if page_title not in seen_templates:
+                pending_templates.append(page_title)
+
+    return seen_templates
+
+
+def collect_recursive_scryfall_template_dependencies(
+    site: BaseSite,
+    root_template_titles: Sequence[str],
+) -> set[str]:
+    """Return Scryfall template descendants that can affect rendered queries."""
+    seen_templates: set[str] = set()
+    pending_templates = deque(root_template_titles)
+
+    while pending_templates:
+        template_title = pending_templates.popleft()
+        if template_title in seen_templates:
+            continue
+        seen_templates.add(template_title)
+
+        template_page = pywikibot.Page(site, template_title)
+        for child_template in template_page.templates(namespaces=[TEMPLATE_NAMESPACE]):
+            child_title = str(child_template.title())
+            if not child_title.lower().startswith("template:scryfall"):
+                continue
+            if child_title not in seen_templates:
+                pending_templates.append(child_title)
+
+    return seen_templates
+
+
+def build_template_dependency_fingerprint(
+    site: BaseSite,
+    root_template_titles: Sequence[str],
+) -> str:
+    """Build a cache fingerprint for templates that can affect rendered queries."""
+    parent_templates = collect_recursive_template_titles(
+        root_template_titles,
+        lambda title: pywikibot.Page(site, title).embeddedin(),
+    )
+    scryfall_dependencies = collect_recursive_scryfall_template_dependencies(
+        site,
+        root_template_titles,
+    )
+    tracked_templates = sorted(parent_templates | scryfall_dependencies)
+
+    template_revisions = {
+        template_title: pywikibot.Page(site, template_title).latest_revision_id
+        for template_title in tracked_templates
+    }
+    return json.dumps(
+        template_revisions,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class ScryfallTemplateUsageGenerator:
     """Iterate over pages that directly or indirectly use Scryfall templates."""
 
@@ -220,6 +296,7 @@ def current_revision_record(
     rev_id: int | None = None,
     detected_page_queries: Sequence[str] | None = None,
     page_queries: Sequence[str] | None = None,
+    template_dependency_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Build a serializable record for the page's latest revision."""
     revision = page.latest_revision
@@ -232,6 +309,8 @@ def current_revision_record(
         "detected_query_cache_version": DETECTED_QUERY_CACHE_VERSION,
         "query_cache_version": QUERY_CACHE_VERSION,
     }
+    if template_dependency_fingerprint is not None:
+        record["template_dependency_fingerprint"] = template_dependency_fingerprint
     if detected_page_queries is not None:
         record["detected_queries"] = list(detected_page_queries)
     if page_queries is not None:
@@ -242,6 +321,7 @@ def current_revision_record(
 def cached_detected_revision_matches(
     cached_revision: dict[str, Any] | None,
     latest_rev_id: int,
+    template_dependency_fingerprint: str | None = None,
 ) -> bool:
     """Return whether cached detected queries can be reused."""
     if not cached_revision:
@@ -250,15 +330,24 @@ def cached_detected_revision_matches(
         return False
     if cached_revision.get("detected_query_cache_version") != DETECTED_QUERY_CACHE_VERSION:
         return False
+    if template_dependency_fingerprint is not None and cached_revision.get(
+        "template_dependency_fingerprint"
+    ) != template_dependency_fingerprint:
+        return False
     return isinstance(cached_revision.get("detected_queries"), list)
 
 
 def cached_revision_matches(
     cached_revision: dict[str, Any] | None,
     latest_rev_id: int,
+    template_dependency_fingerprint: str | None = None,
 ) -> bool:
     """Return whether a cached revision record can be fully reused."""
-    if not cached_detected_revision_matches(cached_revision, latest_rev_id):
+    if not cached_detected_revision_matches(
+        cached_revision,
+        latest_rev_id,
+        template_dependency_fingerprint,
+    ):
         return False
     assert cached_revision is not None
     return cached_revision.get("query_cache_version") == QUERY_CACHE_VERSION
@@ -317,6 +406,10 @@ def main() -> None:
 
     site = get_site(config_path, lang=args.site, family=args.family)
     site.login()
+    template_dependency_fingerprint = build_template_dependency_fingerprint(
+        site,
+        TEMPLATES_TO_CHECK,
+    )
 
     seen_pages: set[str] = set()
     queries: dict[str, list[str]] = {}
@@ -337,7 +430,11 @@ def main() -> None:
 
         latest_rev_id = page.latest_revision_id
         cached_revision = revision_cache.get(page_title)
-        if cached_revision_matches(cached_revision, latest_rev_id):
+        if cached_revision_matches(
+            cached_revision,
+            latest_rev_id,
+            template_dependency_fingerprint,
+        ):
             assert cached_revision is not None
             cached_queries = cached_revision.get("queries")
             if cached_queries is None:
@@ -350,7 +447,11 @@ def main() -> None:
                 )
                 register_page_queries(page_title, cached_queries, queries)
                 continue
-        elif cached_detected_revision_matches(cached_revision, latest_rev_id):
+        elif cached_detected_revision_matches(
+            cached_revision,
+            latest_rev_id,
+            template_dependency_fingerprint,
+        ):
             assert cached_revision is not None
             cached_detected_queries = cached_revision.get("detected_queries")
             assert isinstance(cached_detected_queries, list)
@@ -367,21 +468,24 @@ def main() -> None:
                 latest_rev_id,
                 cached_detected_queries,
                 page_queries,
+                template_dependency_fingerprint,
             )
             continue
         elif cached_revision and cached_revision.get("rev_id") == latest_rev_id:
             pywikibot.info(
-                "  Reprocessing %s due to detected-query cache version mismatch (%s != %s)",
+                "  Reprocessing %s due to cache dependency mismatch",
                 page_title,
-                cached_revision.get("detected_query_cache_version"),
-                DETECTED_QUERY_CACHE_VERSION,
             )
 
         try:
             detected_queries, page_queries = process_page(site, page)
             register_page_queries(page_title, page_queries, queries)
             revision_cache[page_title] = current_revision_record(
-                page, latest_rev_id, detected_queries, page_queries
+                page,
+                latest_rev_id,
+                detected_queries,
+                page_queries,
+                template_dependency_fingerprint,
             )
             if (idx + 1) % 100 == 0:
                 pywikibot.info(f"Processed {idx + 1} pages...")
