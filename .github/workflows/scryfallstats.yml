@@ -24,7 +24,7 @@ jobs:
       # Cache Scryfall data between runs to speed up processing
       - name: Restore cached Scryfall data
         id: cache-data-restore
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           key: ${{ env.REVISION_CACHE_KEY_PREFIX }}-${{ github.run_id }}
           restore-keys: |
@@ -92,7 +92,7 @@ jobs:
       - name: Always cache cache data
         id: cache-save
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           key: ${{ env.REVISION_CACHE_KEY_PREFIX }}-${{ github.run_id }}
           path: |
@@ -122,7 +122,7 @@ jobs:
 
       - name: Restore cached Scryfall data
         id: cache-data-restore
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-${{ github.run_id }}
           restore-keys: |
@@ -167,7 +167,7 @@ jobs:
       - name: Always cache cache data
         id: cache-save
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-${{ github.run_id }}
           path: |
