@@ -142,6 +142,17 @@ jobs:
       - name: Install
         run: uv pip install --system -e .
 
+      - name: Write config.json from secret
+        run: |
+          python - <<'EOF'
+          import os, pathlib
+          config = os.environ["CONFIG_JSON"]
+          path = pathlib.Path("config.json")
+          path.write_text(config, encoding="utf-8")
+          EOF
+        env:
+          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
+
       - name: Fetch Scryfall stats for shard
         env:
           MATRIX_CHUNK_INDEX: ${{ matrix.chunk_index }}
