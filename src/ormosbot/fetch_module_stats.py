@@ -15,8 +15,11 @@ from tqdm import tqdm
 
 from ormosbot.cachedlimiter import CachedLimiterSession, get_session
 from ormosbot.colors import COLOR_ORDER
+from ormosbot.wiki_stats import load_existing_stats
 
 log = logging.getLogger(__name__)
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
 
 
 @retry
@@ -42,8 +45,43 @@ def scryfall_query(session: CachedLimiterSession, query: str) -> requests.Respon
     return response
 
 
-def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str, int]:
-    """Fetch stats from Scryfall API"""
+def fallback_count(
+    fallback_stats: dict[str, dict[str, str]], query: str, color: str
+) -> int:
+    """Return the previously-published count for a query/color, or 0.
+
+    Used when a live Scryfall request fails so we keep the last known good value
+    rather than overwriting the wiki with a spurious 0. Wiki stats are keyed by
+    the casefolded query (see update_module_data.switch_from_mapping).
+    """
+    raw_value = fallback_stats.get(query.casefold(), {}).get(color.lower(), "0")
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+    if value:
+        log.warning(
+            "Using previously-published count %d for %s id=%s (Scryfall unavailable)",
+            value,
+            query,
+            color,
+        )
+    return value
+
+
+def fetch_scryfall_stats(
+    session: CachedLimiterSession,
+    query: str,
+    fallback_stats: dict[str, dict[str, str]] | None = None,
+) -> dict[str, int]:
+    """Fetch stats from Scryfall API.
+
+    When a request fails (rate limiting, 503 maintenance, etc.) the count falls
+    back to the previously-published value from ``fallback_stats`` so transient
+    Scryfall outages do not zero out the wiki data. A genuine 404 (no matching
+    cards) still records 0.
+    """
+    fallback_stats = fallback_stats or {}
     stats = {}
 
     for color in COLOR_ORDER:
@@ -67,7 +105,7 @@ def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str,
                 full_query,
                 retry_after,
             )
-            stats[color.lower()] = 0
+            stats[color.lower()] = fallback_count(fallback_stats, query, color)
         elif response.status_code == 400 and "Display options" in str(response.text):
             log.info("Retrying without brackets for query: %s", no_brackets)
             response = scryfall_query(session, no_brackets)
@@ -85,7 +123,15 @@ def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str,
                     no_brackets,
                     retry_after,
                 )
-                stats[color.lower()] = 0
+                stats[color.lower()] = fallback_count(fallback_stats, query, color)
+            else:
+                log.error(
+                    "Error fetching stats for query %s: %s %s",
+                    no_brackets,
+                    response.status_code,
+                    response.text,
+                )
+                stats[color.lower()] = fallback_count(fallback_stats, query, color)
         else:
             log.error(
                 "Error fetching stats for query %s: %s %s",
@@ -93,18 +139,20 @@ def fetch_scryfall_stats(session: CachedLimiterSession, query: str) -> dict[str,
                 response.status_code,
                 response.text,
             )
-            stats[color.lower()] = 0
+            stats[color.lower()] = fallback_count(fallback_stats, query, color)
 
     return stats
 
 
 def update_data_module(
-    session: CachedLimiterSession, queries: list[str]
+    session: CachedLimiterSession,
+    queries: list[str],
+    fallback_stats: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Fetch stats for each query and return a mapping ready for serialization."""
     results: dict[str, dict[str, str]] = {}
     for query in tqdm(queries, desc="Updating stats"):
-        stats = fetch_scryfall_stats(session, query)
+        stats = fetch_scryfall_stats(session, query, fallback_stats)
         results[query] = {color: str(value) for color, value in stats.items()}
     return results
 
@@ -157,6 +205,11 @@ def main() -> None:
         default="chunk_stats.json",
         help="Path to the JSON file that will store the shard's stats",
     )
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to config.json providing HTTP headers for the wiki",
+    )
     args = parser.parse_args()
 
     Path("logs").mkdir(exist_ok=True)
@@ -182,8 +235,24 @@ def main() -> None:
         len(queries),
     )
 
+    fallback_stats = load_existing_stats(Path(args.config))
+    if fallback_stats:
+        pywikibot.info(
+            "Loaded %d existing query stats from the wiki for fallback",
+            len(fallback_stats),
+        )
+    else:
+        # Surface this prominently: without fallback data a Scryfall outage will
+        # zero out the wiki module data, which is exactly what we want to avoid.
+        log.warning(
+            "No existing stats loaded from the wiki; Scryfall failures will "
+            "fall back to 0 for this shard"
+        )
+
     session = get_session()
-    stats_mapping = update_data_module(session, sorted(set(queries)))
+    stats_mapping = update_data_module(
+        session, sorted(set(queries)), fallback_stats
+    )
 
     payload = {
         "chunk_index": chunk_index,
