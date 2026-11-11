@@ -9,12 +9,17 @@ import math
 import os
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pywikibot
 from pywikibot.site import BaseSite
 
+from ormosbot.dependency_graph import (
+    DependencyGraph,
+    DependencyNode,
+)
 from ormosbot.scryfall_query_inspection import (
     detect_scryfall_queries_from_html,
     filter_structured_scryfall_queries,
@@ -34,6 +39,7 @@ TEMPLATES_TO_CHECK = [
     "Template:Scryfall count",
 ]
 TEMPLATE_NAMESPACE = 10
+REVISION_CACHE_VERSION = 1
 # Bump this when raw Scryfall-link detection semantics change and cached
 # detected queries should be recomputed from rendered page HTML.
 DETECTED_QUERY_CACHE_VERSION = 1
@@ -86,85 +92,54 @@ def collect_recursive_template_usage(
             yield page
 
 
-def collect_recursive_template_titles(
-    root_template_titles: Sequence[str],
-    transclusion_provider: Callable[[str], Iterable[pywikibot.Page]],
-) -> set[str]:
-    """Return template titles reachable from the given roots via transclusion."""
-    seen_templates: set[str] = set()
-    pending_templates = deque(root_template_titles)
-
-    while pending_templates:
-        template_title = pending_templates.popleft()
-        if template_title in seen_templates:
-            continue
-        seen_templates.add(template_title)
-
-        for page in transclusion_provider(template_title):
-            if int(page.namespace()) != TEMPLATE_NAMESPACE:
-                continue
-            page_title = str(page.title())
-            if page_title not in seen_templates:
-                pending_templates.append(page_title)
-
-    return seen_templates
-
-
-def collect_recursive_scryfall_template_dependencies(
+def build_page_dependency_graph(
     site: BaseSite,
     root_template_titles: Sequence[str],
-) -> set[str]:
-    """Return Scryfall template descendants that can affect rendered queries."""
-    seen_templates: set[str] = set()
-    pending_templates = deque(root_template_titles)
-
-    while pending_templates:
-        template_title = pending_templates.popleft()
-        if template_title in seen_templates:
-            continue
-        seen_templates.add(template_title)
-
-        template_page = pywikibot.Page(site, template_title)
-        for child_template in template_page.templates(namespaces=[TEMPLATE_NAMESPACE]):
-            child_title = str(child_template.title())
-            lower_child_title = child_title.lower()
-
+) -> tuple[DependencyGraph, list[pywikibot.Page]]:
+    """Load page metadata and the revisions of their actual dependencies."""
+    pages = list(
+        site.preloadpages(
+            collect_recursive_template_usage(
+                root_template_titles,
+                lambda title: pywikibot.Page(site, title).embeddedin(),
+            ),
+            templates=True,
+            content=False,
+            groupsize=50,
+        )
+    )
+    page_titles = {str(page.title()) for page in pages}
+    graph = DependencyGraph()
+    dependency_pages: dict[str, pywikibot.Page] = {}
+    for page in pages:
+        dependencies: set[str] = set()
+        # MediaWiki reports expanded transclusions, including nested helpers.
+        # Standalone template metadata can include unrelated documentation.
+        for dependency in page.templates():
+            title = str(dependency.title())
+            normalized_title = title.lower().replace("_", " ")
             # Generated stats change counts, not the query URLs.
-            if lower_child_title == "template:scryfall stats/data":
+            if (
+                normalized_title == "template:scryfall stats/data"
+                or normalized_title.startswith("template:scryfall stats/data/")
+            ):
                 continue
-            if not lower_child_title.startswith("template:scryfall"):
-                continue
-            if child_title not in seen_templates:
-                pending_templates.append(child_title)
+            dependencies.add(title)
+            if title not in page_titles:
+                dependency_pages.setdefault(title, dependency)
+        graph[str(page.title())] = DependencyNode(
+            page.latest_revision_id, frozenset(dependencies)
+        )
 
-    return seen_templates
-
-
-def build_template_dependency_fingerprint(
-    site: BaseSite,
-    root_template_titles: Sequence[str],
-) -> str:
-    """Build a cache fingerprint for templates that can affect rendered queries."""
-    parent_templates = collect_recursive_template_titles(
-        root_template_titles,
-        lambda title: pywikibot.Page(site, title).embeddedin(),
-    )
-    scryfall_dependencies = collect_recursive_scryfall_template_dependencies(
-        site,
-        root_template_titles,
-    )
-    tracked_templates = sorted(parent_templates | scryfall_dependencies)
-
-    template_revisions = {
-        template_title: pywikibot.Page(site, template_title).latest_revision_id
-        for template_title in tracked_templates
-    }
-    return json.dumps(
-        template_revisions,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    # Each shared dependency revision is fetched once per run, in batches.
+    for dependency in site.preloadpages(
+        dependency_pages.values(), content=False, groupsize=50
+    ):
+        graph[str(dependency.title())] = DependencyNode(
+            dependency.latest_revision_id if dependency.exists() else None,
+            frozenset(),
+        )
+    return graph, pages
 
 
 class ScryfallTemplateUsageGenerator:
@@ -236,24 +211,55 @@ def dump_queries_to_file(
     return sorted_queries
 
 
-def load_revision_cache(path: Path) -> dict[str, dict[str, Any]]:
-    """Return cached revision metadata keyed by page title."""
+@dataclass
+class RevisionCache:
+    """Saved queries, shared dependency revisions, and pages awaiting updates."""
+
+    pages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    dependency_graph: DependencyGraph = field(default_factory=DependencyGraph)
+    pending_pages: set[str] = field(default_factory=set)
+
+
+def load_revision_cache(path: Path) -> RevisionCache:
+    """Load saved queries and their dependency graph."""
     if not path.exists():
-        return {}
+        return RevisionCache()
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            return data
+            if "cache_version" not in data:
+                # Legacy records lack a graph, so their pages refresh once.
+                return RevisionCache(pages=data)
+            pages = data.get("pages", {})
+            cache = RevisionCache(pages=pages if isinstance(pages, dict) else {})
+            if data.get("cache_version") == REVISION_CACHE_VERSION:
+                pending_pages = data.get("pending_pages")
+                if isinstance(pending_pages, list) and all(
+                    isinstance(title, str) for title in pending_pages
+                ):
+                    cache.dependency_graph = DependencyGraph.deserialize(
+                        data.get("dependency_graph")
+                    )
+                    cache.pending_pages = set(pending_pages)
+            return cache
     except json.JSONDecodeError:
         pywikibot.warning(f"Failed to parse revision cache at {path}; rebuilding")
-    return {}
+    return RevisionCache()
 
 
-def dump_revision_cache(cache: dict[str, dict[str, Any]], path: Path) -> None:
-    """Persist page revision metadata."""
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2, ensure_ascii=False)
+def dump_revision_cache(cache: RevisionCache, path: Path) -> None:
+    """Save queries, dependency revisions, and pending updates together."""
+    data = {
+        "cache_version": REVISION_CACHE_VERSION,
+        "pages": cache.pages,
+        "dependency_graph": cache.dependency_graph.serialize(),
+        "pending_pages": sorted(cache.pending_pages),
+    }
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    temporary_path.replace(path)
 
 
 def build_chunk_files(
@@ -363,6 +369,66 @@ def cached_revision_matches(
     return cached_revision.get("query_cache_version") == QUERY_CACHE_VERSION
 
 
+def collect_page_queries(
+    site: BaseSite,
+    pages: Sequence[pywikibot.Page],
+    revision_cache: RevisionCache,
+    checkpoint: Callable[[dict[str, list[str]]], None] | None = None,
+) -> dict[str, list[str]]:
+    """Reuse saved queries or refresh pages with changed dependencies."""
+    queries: dict[str, list[str]] = {}
+    for idx, page in enumerate(pages):
+        page_title = str(page.title())
+        latest_rev_id = page.latest_revision_id
+        cached_revision = revision_cache.pages.get(page_title)
+        dependencies_changed = page_title in revision_cache.pending_pages
+        try:
+            if (
+                not dependencies_changed
+                and cached_revision is not None
+                and cached_revision_matches(cached_revision, latest_rev_id)
+                and isinstance(cached_revision.get("queries"), list)
+            ):
+                pywikibot.info(
+                    f"  Skipping unchanged page: {page_title} (rev {latest_rev_id})"
+                )
+                register_page_queries(page_title, cached_revision["queries"], queries)
+            elif not dependencies_changed and cached_detected_revision_matches(
+                cached_revision, latest_rev_id
+            ):
+                assert cached_revision is not None
+                detected_queries = cached_revision["detected_queries"]
+                page_queries = filter_structured_scryfall_queries(detected_queries)
+                pywikibot.info(
+                    "  Recomputing structured queries for %s from cached detected links",
+                    page_title,
+                )
+                revision_cache.pages[page_title] = current_revision_record(
+                    page, latest_rev_id, detected_queries, page_queries
+                )
+                register_page_queries(page_title, page_queries, queries)
+            else:
+                if cached_revision and cached_revision.get("rev_id") == latest_rev_id:
+                    pywikibot.info(
+                        "  Reprocessing %s due to cache dependency mismatch", page_title
+                    )
+                detected_queries, page_queries = process_page(site, page)
+                revision_cache.pages[page_title] = current_revision_record(
+                    page, latest_rev_id, detected_queries, page_queries
+                )
+                register_page_queries(page_title, page_queries, queries)
+                revision_cache.pending_pages.discard(page_title)
+        except pywikibot.exceptions.TimeoutError as exc:
+            revision_cache.pending_pages.add(page_title)
+            pywikibot.error(f"  TimeoutError processing {page_title}: {exc}")
+
+        if checkpoint is not None and (idx + 1) % 100 == 0:
+            pywikibot.info(f"Processed {idx + 1} pages...")
+            pywikibot.info(f"  Current queries: {len(queries)}")
+            checkpoint(queries)
+    return queries
+
+
 def main() -> None:
     """Main entry point for setstatsrendered"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -416,95 +482,31 @@ def main() -> None:
 
     site = get_site(config_path, lang=args.site, family=args.family)
     site.login()
-    template_dependency_fingerprint = build_template_dependency_fingerprint(
-        site,
-        TEMPLATES_TO_CHECK,
-    )
-
-    seen_pages: set[str] = set()
-    queries: dict[str, list[str]] = {}
-
     pywikibot.info(
         "Processing transitive template closure for %s", ", ".join(TEMPLATES_TO_CHECK)
     )
-    for idx, page in enumerate(
-        collect_recursive_template_usage(
-            TEMPLATES_TO_CHECK,
-            lambda title: pywikibot.Page(site, title).embeddedin(),
-        )
-    ):
-        page_title = str(page.title())
-        if page_title in seen_pages:
-            continue
-        seen_pages.add(page_title)
+    dependency_graph, pages = build_page_dependency_graph(site, TEMPLATES_TO_CHECK)
+    page_titles = {str(page.title()) for page in pages}
+    revision_cache.pending_pages.update(
+        revision_cache.dependency_graph.invalidated_nodes(dependency_graph)
+        & page_titles
+    )
+    revision_cache.pending_pages.intersection_update(page_titles)
+    revision_cache.dependency_graph = dependency_graph
+    revision_cache.pages = {
+        title: record
+        for title, record in revision_cache.pages.items()
+        if title in page_titles
+    }
+    # Save pending work before rendering. A failed page remains pending even
+    # after the newer shared template revisions are saved.
+    dump_revision_cache(revision_cache, revision_cache_path)
 
-        latest_rev_id = page.latest_revision_id
-        cached_revision = revision_cache.get(page_title)
-        if cached_revision_matches(
-            cached_revision,
-            latest_rev_id,
-            template_dependency_fingerprint,
-        ):
-            assert cached_revision is not None
-            cached_queries = cached_revision.get("queries")
-            if cached_queries is None:
-                pywikibot.info(
-                    f"  Cache missing queries for {page_title}; reprocessing"
-                )
-            else:
-                pywikibot.info(
-                    f"  Skipping unchanged page: {page_title} (rev {latest_rev_id})"
-                )
-                register_page_queries(page_title, cached_queries, queries)
-                continue
-        elif cached_detected_revision_matches(
-            cached_revision,
-            latest_rev_id,
-            template_dependency_fingerprint,
-        ):
-            assert cached_revision is not None
-            cached_detected_queries = cached_revision.get("detected_queries")
-            assert isinstance(cached_detected_queries, list)
-            page_queries = filter_structured_scryfall_queries(cached_detected_queries)
-            pywikibot.info(
-                "  Recomputing structured queries for %s from cached detected links (%s != %s)",
-                page_title,
-                cached_revision.get("query_cache_version"),
-                QUERY_CACHE_VERSION,
-            )
-            register_page_queries(page_title, page_queries, queries)
-            revision_cache[page_title] = current_revision_record(
-                page,
-                latest_rev_id,
-                cached_detected_queries,
-                page_queries,
-                template_dependency_fingerprint,
-            )
-            continue
-        elif cached_revision and cached_revision.get("rev_id") == latest_rev_id:
-            pywikibot.info(
-                "  Reprocessing %s due to cache dependency mismatch",
-                page_title,
-            )
+    def checkpoint(queries: dict[str, list[str]]) -> None:
+        dump_queries_to_file(queries, output_file)
+        dump_revision_cache(revision_cache, revision_cache_path)
 
-        try:
-            detected_queries, page_queries = process_page(site, page)
-            register_page_queries(page_title, page_queries, queries)
-            revision_cache[page_title] = current_revision_record(
-                page,
-                latest_rev_id,
-                detected_queries,
-                page_queries,
-                template_dependency_fingerprint,
-            )
-            if (idx + 1) % 100 == 0:
-                pywikibot.info(f"Processed {idx + 1} pages...")
-                pywikibot.info(f"  Current queries: {len(queries)}")
-                dump_queries_to_file(queries, output_file)
-                dump_revision_cache(revision_cache, revision_cache_path)
-        except pywikibot.exceptions.TimeoutError as exc:
-            pywikibot.error(f"  TimeoutError processing {page_title}: {exc}")
-            continue
+    queries = collect_page_queries(site, pages, revision_cache, checkpoint)
 
     sorted_queries = dump_queries_to_file(queries, output_file)
     dump_revision_cache(revision_cache, revision_cache_path)
