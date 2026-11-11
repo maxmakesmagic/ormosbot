@@ -127,7 +127,12 @@ def collect_recursive_scryfall_template_dependencies(
         template_page = pywikibot.Page(site, template_title)
         for child_template in template_page.templates(namespaces=[TEMPLATE_NAMESPACE]):
             child_title = str(child_template.title())
-            if not child_title.lower().startswith("template:scryfall"):
+            lower_child_title = child_title.lower()
+
+            # Generated stats change counts, not the query URLs.
+            if lower_child_title == "template:scryfall stats/data":
+                continue
+            if not lower_child_title.startswith("template:scryfall"):
                 continue
             if child_title not in seen_templates:
                 pending_templates.append(child_title)
@@ -328,11 +333,16 @@ def cached_detected_revision_matches(
         return False
     if cached_revision.get("rev_id") != latest_rev_id:
         return False
-    if cached_revision.get("detected_query_cache_version") != DETECTED_QUERY_CACHE_VERSION:
+    if (
+        cached_revision.get("detected_query_cache_version")
+        != DETECTED_QUERY_CACHE_VERSION
+    ):
         return False
-    if template_dependency_fingerprint is not None and cached_revision.get(
-        "template_dependency_fingerprint"
-    ) != template_dependency_fingerprint:
+    if (
+        template_dependency_fingerprint is not None
+        and cached_revision.get("template_dependency_fingerprint")
+        != template_dependency_fingerprint
+    ):
         return False
     return isinstance(cached_revision.get("detected_queries"), list)
 
