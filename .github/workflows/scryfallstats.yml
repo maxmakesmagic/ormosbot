@@ -191,6 +191,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: OrmosBot
     timeout-minutes: 600
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: scryfall-stats-update-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -243,6 +249,12 @@ jobs:
         env:
           EXPECTED_QUERY_TOTAL: ${{ needs.prepare_scryfall_data.outputs.query-total }}
           UPDATE_WIKI: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+
+      - name: Report pages with missing Scryfall data
+        if: github.ref == 'refs/heads/main'
+        run: uv run report-missing-scryfall-data
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Archive log files
         if: always()

@@ -25,6 +25,7 @@ dependencies = [
 setstatsrendered = "ormosbot.setstatsrendered:main"
 fetch-module-stats = "ormosbot.fetch_module_stats:main"
 update-module-data = "ormosbot.update_module_data:main"
+report-missing-scryfall-data = "ormosbot.report_missing_scryfall_data:main"
 
 [tool.mypy]
 python_version = "3.12"
