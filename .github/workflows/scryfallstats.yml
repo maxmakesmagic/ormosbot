@@ -113,8 +113,8 @@ jobs:
     environment: OrmosBot
     timeout-minutes: 600
     env:
-      SCRYFALL_CACHE_KEY_PREFIX: scryfall-cache-${{ github.ref_name }}
-      SCRYFALL_CACHE_KEY_MAIN: scryfall-cache-main
+      SCRYFALL_CACHE_KEY_PREFIX: scryfall-cache-accept-any-${{ github.ref_name }}
+      SCRYFALL_CACHE_KEY_MAIN: scryfall-cache-accept-any-main
     strategy:
       matrix:
         # One job per chunk index
@@ -134,9 +134,11 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           key: ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-${{ github.run_id }}
+          # The last fallback restores the cache from before the Accept header changed.
           restore-keys: |
             ${{ env.SCRYFALL_CACHE_KEY_PREFIX }}-${{ matrix.chunk_index }}-
             ${{ env.SCRYFALL_CACHE_KEY_MAIN }}-${{ matrix.chunk_index }}-
+            scryfall-cache-main-${{ matrix.chunk_index }}-45361794058
           path: |
             cache.db
 

@@ -45,7 +45,7 @@ def _request_scryfall(
         return session.get(
             "https://api.scryfall.com/cards/search",
             timeout=10,
-            headers={"User-Agent": "OrmosBot/1.0", "Accept": "application/json"},
+            headers={"User-Agent": "OrmosBot/1.0"},
             params={"q": query},
             force_refresh=force_refresh,
         )
