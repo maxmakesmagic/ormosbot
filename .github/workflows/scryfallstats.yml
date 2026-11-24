@@ -2,6 +2,17 @@ name: Update Scryfall Stats
 
 on:
   workflow_dispatch:
+    inputs:
+      apply:
+        description: Publish the query changes and a data release
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: scryfall-stats-update-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   prepare_scryfall_data:
@@ -156,7 +167,7 @@ jobs:
           MATRIX_CHUNK_INDEX: ${{ matrix.chunk_index }}
           MATRIX_QUERIES_FILE: query-chunks/chunk-${{ matrix.chunk_index }}.json
         run: |
-          uv run fetch-module-stats --output-file chunk-${MATRIX_CHUNK_INDEX}.json
+          uv run fetch-module-stats --raw-results --output-file chunk-${MATRIX_CHUNK_INDEX}.json
 
       - name: Upload chunk stats
         uses: actions/upload-artifact@v7
@@ -190,14 +201,38 @@ jobs:
     environment: OrmosBot
     timeout-minutes: 600
     permissions:
-      contents: read
+      contents: write
       issues: write
-    concurrency:
-      group: scryfall-stats-update-${{ github.ref }}
-      cancel-in-progress: false
+    env:
+      APPLY_STATS: ${{ github.ref == 'refs/heads/main' && (inputs.apply || github.event_name == 'schedule') && 'true' || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download Scryfall query data
+        uses: actions/download-artifact@v8
+        with:
+          name: scryfall-query-data
+          path: query-data
+
+      - name: Find the published Scryfall stats
+        id: published_stats
+        uses: cardinalby/git-get-release-action@2ab178299eecb253f820dcf2cce11f62be1178f7 # v1
+        with:
+          releaseNameRegEx: '^Scryfall stats data (0\.0|[1-9][0-9]*)$'
+          draft: 'false'
+          prerelease: 'false'
+          searchLimit: '1000'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Download the published Scryfall snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_TAG: ${{ steps.published_stats.outputs.tag_name }}
+        run: gh release download "$BASELINE_TAG" --repo "$GITHUB_REPOSITORY" --pattern scryfall-stats.json --dir published-stats
 
       - name: Download chunk stats
         uses: actions/download-artifact@v8
@@ -242,17 +277,39 @@ jobs:
       - name: Install
         run: uv pip install --system -e .
 
-      - name: Update wiki with merged stats
-        run: uv run update-module-data --stats-dir shard-stats
+      - name: Prepare or publish Scryfall stats
         env:
-          EXPECTED_QUERY_TOTAL: ${{ needs.prepare_scryfall_data.outputs.query-total }}
-          UPDATE_WIKI: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_TAG: ${{ steps.published_stats.outputs.tag_name }}
+        run: |
+          args=()
+          if [[ "$APPLY_STATS" == true ]]; then
+            args+=(--apply)
+          fi
+          uv run publish-scryfall-release \
+            --baseline published-stats/scryfall-stats.json \
+            --baseline-tag "$BASELINE_TAG" \
+            --stats-dir shard-stats \
+            --queries query-data/scryfall_queries.json \
+            --output release-output/scryfall-stats.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "scryfall-stats-data-$GITHUB_RUN_NUMBER" \
+            --commit "$GITHUB_SHA" \
+            "${args[@]}"
 
       - name: Report pages with missing Scryfall data
-        if: github.ref == 'refs/heads/main'
+        if: env.APPLY_STATS == 'true'
         run: uv run report-missing-scryfall-data
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Upload the combined Scryfall snapshot
+        if: always() && hashFiles('release-output/scryfall-stats.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: scryfall-stats-snapshot-${{ github.run_attempt }}
+          path: release-output/scryfall-stats.json
+          if-no-files-found: error
 
       - name: Archive log files
         if: always()
