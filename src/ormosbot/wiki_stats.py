@@ -36,11 +36,14 @@ def unescape_switch_case_value(value: str) -> str:
     return result
 
 
-def parse_switch_template(text: str) -> dict[str, dict[str, str]]:
+def parse_switch_template(
+    text: str, *, strict: bool = False
+) -> dict[str, dict[str, str]]:
     """Parse a Scryfall stats #switch template into a query -> color map.
 
     Keys are the casefolded (and unescaped) query strings, matching the form
     produced by :func:`ormosbot.update_module_data.switch_from_mapping`.
+    Strict mode rejects incomplete or inconsistent rows during a backfill.
     """
     mapping: dict[str, dict[str, str]] = {}
     for raw_line in text.splitlines():
@@ -50,20 +53,29 @@ def parse_switch_template(text: str) -> dict[str, dict[str, str]]:
         # Drop the leading "| " switch-case marker.
         body = line[1:].strip()
         if " = " not in body:
+            if strict and body != "default =":
+                raise ValueError(f"Malformed stats row: {raw_line!r}")
             continue
         key, _, csv = body.partition(" = ")
         key = unescape_switch_case_value(key.strip())
         if key in {"default", ""}:
             continue
         parts = [part.strip() for part in csv.split(",")]
+        if strict:
+            if len(parts) != len(COLOR_ORDER) + 1 or not all(
+                part.isascii() and part.isdecimal() for part in parts
+            ):
+                raise ValueError(f"Malformed stats row for {key!r}: {csv!r}")
+            if sum(map(int, parts[:-1])) != int(parts[-1]):
+                raise ValueError(f"Inconsistent stats total for {key!r}: {csv!r}")
+            if key in mapping:
+                raise ValueError(f"Duplicate stats row for {key!r}")
         # Stored CSV is one value per color followed by a total; ignore the total
         # and any unexpected trailing values.
         if len(parts) < len(COLOR_ORDER):
             log.warning("Skipping malformed stats line for %r: %s", key, csv)
             continue
-        color_counts = {
-            color: parts[index] for index, color in enumerate(COLOR_ORDER)
-        }
+        color_counts = {color: parts[index] for index, color in enumerate(COLOR_ORDER)}
         mapping[key] = color_counts
     return mapping
 
@@ -95,7 +107,5 @@ def load_existing_stats(
         return {}
 
     mapping = parse_switch_template(text)
-    log.info(
-        "Loaded %d existing query stats from %s", len(mapping), STATS_DATA_PAGE
-    )
+    log.info("Loaded %d existing query stats from %s", len(mapping), STATS_DATA_PAGE)
     return mapping

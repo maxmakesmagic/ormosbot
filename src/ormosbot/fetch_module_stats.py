@@ -6,11 +6,18 @@ import argparse
 import json
 import logging
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import pywikibot
 import requests
-from tenacity import retry
+from tenacity import (
+    Retrying,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 from tqdm import tqdm
 
 from ormosbot.cachedlimiter import CachedLimiterSession, get_session
@@ -25,24 +32,99 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
 @retry
 def scryfall_query(session: CachedLimiterSession, query: str) -> requests.Response:
     """Perform a Scryfall API search query and return the JSON response."""
+    return _request_scryfall(session, query)
+
+
+def _request_scryfall(
+    session: CachedLimiterSession, query: str, *, force_refresh: bool = False
+) -> requests.Response:
     log.info("Querying Scryfall API with query: %s", query)
 
-    if "+" in query:
-        with session.cache_disabled():
-            response = session.get(
-                "https://api.scryfall.com/cards/search",
-                timeout=10,
-                headers={"User-Agent": "OrmosBot/1.0"},
-                params={"q": query},
-            )
-    else:
-        response = session.get(
+    cache = session.cache_disabled() if "+" in query else nullcontext()
+    with cache:
+        return session.get(
             "https://api.scryfall.com/cards/search",
             timeout=10,
-            headers={"User-Agent": "OrmosBot/1.0"},
+            headers={"User-Agent": "OrmosBot/1.0", "Accept": "application/json"},
             params={"q": query},
+            force_refresh=force_refresh,
         )
-    return response
+
+
+class _RetryableSearchError(Exception):
+    """A Scryfall response that can be retried."""
+
+
+def _count_from_response(response: requests.Response, query: str) -> int | None:
+    status = response.status_code
+    if status == 408 or 500 <= status < 600:
+        raise _RetryableSearchError(f"HTTP {status}")
+
+    if 200 <= status < 300 or status == 404:
+        try:
+            data = response.json()
+        except requests.exceptions.JSONDecodeError:
+            data = None
+
+        if status == 404:
+            if (
+                isinstance(data, dict)
+                and data.get("object") == "error"
+                and data.get("code") == "not_found"
+            ):
+                return 0
+        else:
+            count = data.get("total_cards") if isinstance(data, dict) else None
+            if type(count) is int and count >= 0:
+                return count
+            raise _RetryableSearchError("Invalid or missing total_cards")
+
+    if status == 429:
+        log.warning(
+            "Scryfall rate limited %s. Retry-After: %s",
+            query,
+            response.headers.get("Retry-After", "unknown"),
+        )
+    else:
+        log.warning("No Scryfall count for %s (HTTP %d)", query, status)
+    return None
+
+
+def _fetch_raw_count(
+    session: CachedLimiterSession, query: str, color: str
+) -> int | None:
+    bracketed_search = f"({query}) id={color}"
+    search = bracketed_search
+    retryable = (requests.exceptions.RequestException, _RetryableSearchError)
+    try:
+        for attempt in Retrying(
+            retry=retry_if_exception_type(retryable),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1),
+            reraise=True,
+        ):
+            with attempt:
+                refresh = attempt.retry_state.attempt_number > 1
+                response = _request_scryfall(session, search, force_refresh=refresh)
+                if (
+                    search == bracketed_search
+                    and response.status_code == 400
+                    and "Display options" in response.text
+                ):
+                    search = f"{query} id={color}"
+                    log.info("Retrying without brackets for query: %s", search)
+                    response = _request_scryfall(session, search, force_refresh=refresh)
+                return _count_from_response(response, search)
+    except retryable as exc:
+        log.warning("No Scryfall count for %s after retries: %s", search, exc)
+    return None
+
+
+def fetch_scryfall_raw_stats(
+    session: CachedLimiterSession, query: str
+) -> dict[str, int | None]:
+    """Return per-color counts with None for unavailable results."""
+    return {color: _fetch_raw_count(session, query, color) for color in COLOR_ORDER}
 
 
 def fallback_count(
@@ -210,6 +292,11 @@ def main() -> None:
         default=str(DEFAULT_CONFIG_PATH),
         help="Path to config.json providing HTTP headers for the wiki",
     )
+    parser.add_argument(
+        "--raw-results",
+        action="store_true",
+        help="Write integer counts and nulls for failed lookups",
+    )
     args = parser.parse_args()
 
     Path("logs").mkdir(exist_ok=True)
@@ -235,24 +322,32 @@ def main() -> None:
         len(queries),
     )
 
-    fallback_stats = load_existing_stats(Path(args.config))
-    if fallback_stats:
-        pywikibot.info(
-            "Loaded %d existing query stats from the wiki for fallback",
-            len(fallback_stats),
-        )
+    ordered_queries = sorted(set(queries))
+    stats_mapping: dict[str, dict[str, str]] | dict[str, dict[str, int | None]]
+    if args.raw_results:
+        session = get_session()
+        stats_mapping = {
+            query: fetch_scryfall_raw_stats(session, query)
+            for query in tqdm(ordered_queries, desc="Fetching stats")
+        }
     else:
-        # Surface this prominently: without fallback data a Scryfall outage will
-        # zero out the wiki module data, which is exactly what we want to avoid.
-        log.warning(
-            "No existing stats loaded from the wiki; Scryfall failures will "
-            "fall back to 0 for this shard"
-        )
+        fallback_stats = load_existing_stats(Path(args.config))
+        if fallback_stats:
+            pywikibot.info(
+                "Loaded %d existing query stats from the wiki for fallback",
+                len(fallback_stats),
+            )
+        else:
+            # Surface this prominently: without fallback data a Scryfall outage will
+            # zero out the wiki module data, which is exactly what we want to avoid.
+            log.warning(
+                "No existing stats loaded from the wiki; Scryfall failures will "
+                "fall back to 0 for this shard"
+            )
 
-    session = get_session()
-    stats_mapping = update_data_module(
-        session, sorted(set(queries)), fallback_stats
-    )
+        stats_mapping = update_data_module(
+            get_session(), ordered_queries, fallback_stats
+        )
 
     payload = {
         "chunk_index": chunk_index,
