@@ -2,8 +2,6 @@ name: Update Scryfall Stats
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
 
 jobs:
   prepare_scryfall_data:
