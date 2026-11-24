@@ -7,6 +7,8 @@ on:
         description: Publish the query changes and a data release
         type: boolean
         default: false
+  schedule:
+    - cron: "0 0 * * *"
 
 concurrency:
   group: scryfall-stats-update-${{ github.ref }}
