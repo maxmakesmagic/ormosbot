@@ -12,16 +12,28 @@ from ormosbot.scryfall_query_inspection import (
 class TestDetectScryfallQueriesFromHtml:
     """Tests for raw rendered Scryfall query detection."""
 
-    def test_detects_all_direct_queries_except_tracking_links(self) -> None:
-        """Keeps direct search links before structured-query filtering."""
+    def test_detects_only_queries_inside_marked_stats_and_counts(self) -> None:
+        """Read marked template links before structured-query filtering."""
         html = """
-        <div>
-          <a href="https://scryfall.com/search?q=t%3Acreature">Creatures</a>
-          <a href="https://scryfall.com/search?q=color%3D%22WB%22">White-black</a>
-          <a href="https://scryfall.com/search?q=cmc%3E3&utm_source=mtgwiki">Tracked</a>
+        <div class="scrylinks" data-scryfall-stats="1">
+          <span><a href="https://scryfall.com/search?q=t%3Acreature">Creatures</a></span>
+          <a href="https://scryfall.com/search?q=cmc%3E3&amp;utm_source=mtgwiki">Tracked</a>
           <a href="https://example.com/elsewhere">Elsewhere</a>
-          <a href="https://scryfall.com/search?q=angel">Plain text</a>
         </div>
+        <span data-scryfall-stats="1">
+          <a href="https://scryfall.com/search?q=color%3D%22WB%22">White-black</a>
+          <a href="https://scryfall.com/search?q=angel">Plain text</a>
+        </span>
+        <a href="https://scryfall.com/search?q=t%3Aartifact">Hard-coded link</a>
+        <div class="scrylinks">
+          <a href="https://scryfall.com/search?q=t%3Aland">Class only</a>
+        </div>
+        <a data-scryfall-stats="1" href="https://scryfall.com/search?q=t%3Ainstant">
+          Anchor is not a descendant
+        </a>
+        <span data-scryfall-stats="0">
+          <a href="https://scryfall.com/search?q=t%3Aenchantment">Wrong marker value</a>
+        </span>
         """
 
         assert detect_scryfall_queries_from_html(html) == [
@@ -34,16 +46,17 @@ class TestDetectScryfallQueriesFromHtml:
 class TestExtractScryfallQueriesFromHtml:
     """Tests for structured rendered Scryfall query extraction."""
 
-    def test_extracts_direct_queries_only(self) -> None:
-        """Keeps structured direct search links and skips tracking/plain text."""
+    def test_extracts_structured_queries_inside_marked_output(self) -> None:
+        """Keep structured marked links and skip tracking and plain text."""
         html = """
-        <div>
+        <div data-scryfall-stats="1">
           <a href="https://scryfall.com/search?q=t%3Acreature">Creatures</a>
           <a href="https://scryfall.com/search?q=color%3D%22WB%22">White-black</a>
-          <a href="https://scryfall.com/search?q=cmc%3E3&utm_source=mtgwiki">Tracked</a>
+          <a href="https://scryfall.com/search?q=cmc%3E3&amp;utm_source=mtgwiki">Tracked</a>
           <a href="https://example.com/elsewhere">Elsewhere</a>
           <a href="https://scryfall.com/search?q=angel">No colon</a>
         </div>
+        <a href="https://scryfall.com/search?q=t%3Aartifact">Hard-coded link</a>
         """
 
         assert extract_scryfall_queries_from_html(html) == [

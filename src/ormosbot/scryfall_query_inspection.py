@@ -49,12 +49,11 @@ def normalize_template_name(name: str) -> str:
 
 
 def detect_scryfall_queries_from_html(parsed_page: str) -> list[str]:
-    """Detect all direct Scryfall search queries from rendered page HTML."""
-    # Use beautifulsoup to extract all external links from the rendered HTML.
+    """Detect queries from links marked by the Scryfall stats templates."""
     soup = bs4.BeautifulSoup(parsed_page, "html.parser")
     detected_queries: set[str] = set()
 
-    for link in soup.find_all("a", href=True):
+    for link in soup.select('[data-scryfall-stats="1"] a[href]'):
         url = str(link.attrs["href"])
         if "scryfall.com/search?q=" not in url:
             continue
@@ -78,7 +77,7 @@ def filter_structured_scryfall_queries(queries: Iterable[str]) -> list[str]:
 
 
 def extract_scryfall_queries_from_html(parsed_page: str) -> list[str]:
-    """Extract unique structured Scryfall search queries from rendered page HTML."""
+    """Extract unique structured queries from rendered Scryfall stats links."""
     detected_queries = detect_scryfall_queries_from_html(parsed_page)
 
     # Skip loose text searches and keep only structured Scryfall queries.
