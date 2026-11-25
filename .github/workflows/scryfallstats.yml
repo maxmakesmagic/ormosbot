@@ -281,10 +281,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BASELINE_TAG: ${{ steps.published_stats.outputs.tag_name }}
+          SCRYFALL_WIKI_EDIT_INTERVAL_SECONDS: ${{ vars.SCRYFALL_WIKI_EDIT_INTERVAL_SECONDS || '3' }}
         run: |
           args=()
           if [[ "$APPLY_STATS" == true ]]; then
-            args+=(--apply)
+            args+=(--apply --put-throttle "$SCRYFALL_WIKI_EDIT_INTERVAL_SECONDS")
           fi
           uv run publish-scryfall-release \
             --baseline published-stats/scryfall-stats.json \
