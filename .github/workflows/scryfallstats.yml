@@ -278,6 +278,7 @@ jobs:
         run: uv pip install --system -e .
 
       - name: Prepare or publish Scryfall stats
+        id: publish_stats
         env:
           GH_TOKEN: ${{ github.token }}
           BASELINE_TAG: ${{ steps.published_stats.outputs.tag_name }}
@@ -303,6 +304,10 @@ jobs:
         run: uv run report-missing-scryfall-data
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Report unused Scryfall data pages
+        if: ${{ !cancelled() && env.APPLY_STATS == 'true' && steps.publish_stats.outcome == 'success' }}
+        run: uv run report-scryfall-cleanup --apply
 
       - name: Upload the combined Scryfall snapshot
         if: always() && hashFiles('release-output/scryfall-stats.json') != ''

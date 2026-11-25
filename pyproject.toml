@@ -28,6 +28,7 @@ update-module-data = "ormosbot.update_module_data:main"
 publish-scryfall-json = "ormosbot.publish_scryfall_json:main"
 publish-scryfall-release = "ormosbot.publish_scryfall_release:main"
 report-missing-scryfall-data = "ormosbot.report_missing_scryfall_data:main"
+report-scryfall-cleanup = "ormosbot.report_scryfall_cleanup:main"
 
 [tool.mypy]
 python_version = "3.12"
