@@ -36,7 +36,7 @@ TEMPLATES_TO_CHECK = [
 TEMPLATE_NAMESPACE = 10
 # Bump this when raw Scryfall-link detection semantics change and cached
 # detected queries should be recomputed from rendered page HTML.
-DETECTED_QUERY_CACHE_VERSION = 1
+DETECTED_QUERY_CACHE_VERSION = 2
 # Bump this when structured-query filtering semantics change. Matching pages can
 # then reuse cached detected queries without refetching unchanged wiki pages.
 QUERY_CACHE_VERSION = 3
