@@ -284,7 +284,7 @@ jobs:
         run: |
           args=()
           if [[ "$APPLY_STATS" == true ]]; then
-            args+=(--apply)
+            args+=(--apply --put-throttle 3)
           fi
           uv run publish-scryfall-release \
             --baseline published-stats/scryfall-stats.json \

@@ -229,7 +229,17 @@ def main() -> None:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--put-throttle",
+        type=int,
+        metavar="SECONDS",
+        help="Set the minimum interval between wiki edits",
+    )
     args = parser.parse_args()
+    if args.put_throttle is not None:
+        if args.put_throttle < 1:
+            parser.error("--put-throttle must be at least one second")
+        pywikibot.config.put_throttle = args.put_throttle
 
     version = release_version(args.tag)
     if args.apply and (
